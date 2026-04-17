@@ -7,6 +7,7 @@ const ZigTerminal = @import("../Terminal.zig");
 const Stream = @import("../stream_terminal.zig").Stream;
 const ScreenSet = @import("../ScreenSet.zig");
 const PageList = @import("../PageList.zig");
+const perf = @import("../perf.zig");
 const kitty = @import("../kitty/key.zig");
 const kitty_gfx_c = @import("kitty_graphics.zig");
 const modes = @import("../modes.zig");
@@ -286,7 +287,9 @@ pub fn vt_write(
     len: usize,
 ) callconv(lib.calling_conv) void {
     const wrapper = terminal_ orelse return;
+    const started = perf.start();
     wrapper.stream.nextSlice(ptr[0..len]);
+    perf.recordVtWrite(started, len);
 }
 
 /// C: GhosttyTerminalOption

@@ -14,6 +14,7 @@ const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinked
 const color = @import("color.zig");
 const highlight = @import("highlight.zig");
 const kitty = @import("kitty.zig");
+const perf = @import("perf.zig");
 const point = @import("point.zig");
 const pagepkg = @import("page.zig");
 const stylepkg = @import("style.zig");
@@ -3109,6 +3110,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // Fast path: we have capacity in the last page.
         last.data.size.rows += 1;
         last.data.assertIntegrity();
+        perf.recordGrow(.fast);
 
         // Increase our total rows by one
         self.total_rows += 1;
@@ -3207,6 +3209,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         // we're reusing an existing page so nothing has changed.
 
         first.data.assertIntegrity();
+        perf.recordGrow(.prune_reuse);
         return first;
     }
 
@@ -3223,6 +3226,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
     // Record the increased row count
     self.total_rows += 1;
+    perf.recordGrow(.alloc);
 
     return next_node;
 }
@@ -3303,6 +3307,8 @@ pub fn increaseCapacity(
             }
         },
     };
+
+    perf.recordIncreaseCapacity();
 
     // Capacity growth can be hot on style/grapheme-heavy workloads, so keep
     // this out of the default info log path.
