@@ -757,7 +757,7 @@ pub fn Stream(comptime H: type) type {
                 return;
             }
 
-            if (@hasDecl(Handler, "printMany")) {
+            if (@hasDecl(T, "printMany")) {
                 self.handler.printMany(cps);
                 return;
             }

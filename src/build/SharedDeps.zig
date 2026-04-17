@@ -104,6 +104,18 @@ pub fn add(
     self: *const SharedDeps,
     step: *std.Build.Step.Compile,
 ) !LazyPathList {
+    return self.addWith(step, .{});
+}
+
+pub const AddOptions = struct {
+    metallib: bool = true,
+};
+
+pub fn addWith(
+    self: *const SharedDeps,
+    step: *std.Build.Step.Compile,
+    add_options: AddOptions,
+) !LazyPathList {
     const b = step.step.owner;
 
     // We could use our config.target/optimize fields here but its more
@@ -432,11 +444,13 @@ pub fn add(
     if (step.rootModuleTarget().os.tag.isDarwin()) {
         try @import("apple_sdk").addPaths(b, step);
 
-        const metallib = self.metallib.?;
-        metallib.output.addStepDependencies(&step.step);
-        step.root_module.addAnonymousImport("ghostty_metallib", .{
-            .root_source_file = metallib.output,
-        });
+        if (add_options.metallib) {
+            const metallib = self.metallib.?;
+            metallib.output.addStepDependencies(&step.step);
+            step.root_module.addAnonymousImport("ghostty_metallib", .{
+                .root_source_file = metallib.output,
+            });
+        }
     }
 
     // Other dependencies, mostly pure Zig

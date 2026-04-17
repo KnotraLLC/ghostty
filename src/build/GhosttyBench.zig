@@ -26,7 +26,7 @@ pub fn init(
             }),
         });
         exe.linkLibC();
-        _ = try deps.add(exe);
+        _ = try deps.addWith(exe, .{ .metallib = false });
         try steps.append(b.allocator, exe);
     }
 
@@ -42,7 +42,7 @@ pub fn init(
             }),
         });
         exe.linkLibC();
-        _ = try deps.add(exe);
+        _ = try deps.addWith(exe, .{ .metallib = false });
         try steps.append(b.allocator, exe);
     }
 
