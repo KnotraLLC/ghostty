@@ -182,6 +182,15 @@ pub const StreamHandler = struct {
         };
     }
 
+    pub fn printMany(self: *StreamHandler, cps: []const u32) void {
+        for (cps) |cp| {
+            self.terminal.print(@intCast(cp)) catch |err| {
+                log.warn("error handling VT print batch err={}", .{err});
+                return;
+            };
+        }
+    }
+
     inline fn vtFallible(
         self: *StreamHandler,
         comptime action: Stream.Action.Tag,

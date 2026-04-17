@@ -521,13 +521,15 @@ pub fn Stream(comptime H: type) type {
             // up to that point are just UTF-8.
             while (self.parser.state == .ground and offset < input.len) {
                 const res = simd.vt.utf8DecodeUntilControlSeq(input[offset..], cp_buf);
-                for (cp_buf[0..res.decoded]) |cp| {
+                var printable_start: usize = 0;
+                for (cp_buf[0..res.decoded], 0..) |cp, i| {
                     if (cp <= 0xF) {
+                        self.printMany(cp_buf[printable_start..i]);
                         self.execute(@intCast(cp));
-                    } else {
-                        self.print(@intCast(cp));
+                        printable_start = i + 1;
                     }
                 }
+                self.printMany(cp_buf[printable_start..res.decoded]);
                 // Consume the bytes we just processed.
                 offset += res.consumed;
 
@@ -746,6 +748,21 @@ pub fn Stream(comptime H: type) type {
 
         inline fn print(self: *Self, c: u21) void {
             self.handler.vt(.print, .{ .cp = c });
+        }
+
+        inline fn printMany(self: *Self, cps: []const u32) void {
+            if (cps.len == 0) return;
+            if (cps.len == 1) {
+                self.print(@intCast(cps[0]));
+                return;
+            }
+
+            if (@hasDecl(Handler, "printMany")) {
+                self.handler.printMany(cps);
+                return;
+            }
+
+            for (cps) |cp| self.print(@intCast(cp));
         }
 
         inline fn execute(self: *Self, c: u8) void {
@@ -3446,4 +3463,39 @@ test "stream: tab clear with overflowing param" {
     // This is the exact input from the fuzz crash (minus the mode byte):
     // CSI with a huge numeric param that saturates to 65535, followed by 'g'.
     s.nextSlice("\x1b[388888888888888888888888888888888888g\x1b[0m");
+}
+
+test "stream: printable runs use printMany when available" {
+    const H = struct {
+        print_calls: usize = 0,
+        print_many_calls: usize = 0,
+        print_many_len: usize = 0,
+        controls: usize = 0,
+
+        pub fn vt(
+            self: *@This(),
+            comptime action: Action.Tag,
+            value: Action.Value(action),
+        ) void {
+            _ = value;
+            switch (action) {
+                .print => self.print_calls += 1,
+                .bell => self.controls += 1,
+                else => {},
+            }
+        }
+
+        pub fn printMany(self: *@This(), cps: []const u32) void {
+            self.print_many_calls += 1;
+            self.print_many_len += cps.len;
+        }
+    };
+
+    var s: Stream(H) = .init(.{});
+
+    s.nextSlice("ab\x07cd");
+    try testing.expectEqual(@as(usize, 0), s.handler.print_calls);
+    try testing.expectEqual(@as(usize, 2), s.handler.print_many_calls);
+    try testing.expectEqual(@as(usize, 4), s.handler.print_many_len);
+    try testing.expectEqual(@as(usize, 1), s.handler.controls);
 }

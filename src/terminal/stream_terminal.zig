@@ -120,6 +120,20 @@ pub const Handler = struct {
         };
     }
 
+    pub fn printMany(self: *Handler, cps: []const u32) void {
+        if (perf.enabled()) {
+            for (cps) |cp| self.vt(.print, .{ .cp = @intCast(cp) });
+            return;
+        }
+
+        for (cps) |cp| {
+            self.terminal.print(@intCast(cp)) catch |err| {
+                log.warn("error handling VT print batch err={}", .{err});
+                return;
+            };
+        }
+    }
+
     inline fn vtFallible(
         self: *Handler,
         comptime action: Action.Tag,
