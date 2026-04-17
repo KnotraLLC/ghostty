@@ -693,17 +693,20 @@ fn printCell(
     defer self.screens.active.assertIntegrity();
 
     // TODO: spacers should use a bgcolor only cell
+    const cursor = &self.screens.active.cursor;
+    const cell = cursor.page_cell;
+    const charset = &self.screens.active.charset;
 
     const c: u21 = c: {
         // TODO: non-utf8 handling, gr
 
         // If we're single shifting, then we use the key exactly once.
-        const key = if (self.screens.active.charset.single_shift) |key_once| blk: {
-            self.screens.active.charset.single_shift = null;
+        const key = if (charset.single_shift) |key_once| blk: {
+            charset.single_shift = null;
             break :blk key_once;
-        } else self.screens.active.charset.gl;
+        } else charset.gl;
 
-        const set = self.screens.active.charset.charsets.get(key);
+        const set = charset.charsets.get(key);
 
         // UTF-8 or ASCII is used as-is
         if (set == .utf8 or set == .ascii) {
@@ -720,7 +723,20 @@ fn printCell(
         break :c @intCast(table[@intCast(unmapped_c)]);
     };
 
-    const cell = self.screens.active.cursor.page_cell;
+    // Fast path for the common overwrite case: same cell shape, no managed
+    // memory to clear, and no cursor-side style/hyperlink state changes.
+    if (cell.wide == wide and
+        !cell.hasGrapheme() and
+        cell.style_id == cursor.style_id and
+        !cell.hyperlink and
+        cursor.hyperlink_id == 0 and
+        cell.protected == cursor.protected and
+        cell.semantic_content == cursor.semantic_content)
+    {
+        cell.content_tag = .codepoint;
+        cell.content = .{ .codepoint = c };
+        return;
+    }
 
     // If the wide property of this cell is the same, then we don't
     // need to do the special handling here because the structure will
@@ -793,7 +809,7 @@ fn printCell(
 
     // We don't need to update the style refs unless the
     // cell's new style will be different after writing.
-    const style_changed = cell.style_id != self.screens.active.cursor.style_id;
+    const style_changed = cell.style_id != cursor.style_id;
     if (style_changed) {
         var page = &self.screens.active.cursor.page_pin.node.data;
 
@@ -811,10 +827,10 @@ fn printCell(
     cell.* = .{
         .content_tag = .codepoint,
         .content = .{ .codepoint = c },
-        .style_id = self.screens.active.cursor.style_id,
+        .style_id = cursor.style_id,
         .wide = wide,
-        .protected = self.screens.active.cursor.protected,
-        .semantic_content = self.screens.active.cursor.semantic_content,
+        .protected = cursor.protected,
+        .semantic_content = cursor.semantic_content,
     };
 
     if (style_changed) {
@@ -839,7 +855,7 @@ fn printCell(
     // We check for an active hyperlink first because setHyperlink
     // handles clearing the old hyperlink and an optimization if we're
     // overwriting the same hyperlink.
-    if (self.screens.active.cursor.hyperlink_id > 0) {
+    if (cursor.hyperlink_id > 0) {
         self.screens.active.cursorSetHyperlink() catch |err| {
             @branchHint(.unlikely);
             log.warn("error reallocating for more hyperlink space, ignoring hyperlink err={}", .{err});
@@ -5190,6 +5206,24 @@ test "Terminal: print with hyperlink" {
     }
 
     try testing.expect(t.isDirty(.{ .screen = .{ .x = 0, .y = 0 } }));
+}
+
+test "Terminal: print over cell with same style" {
+    var t = try init(testing.allocator, .{ .cols = 10, .rows = 2 });
+    defer t.deinit(testing.allocator);
+
+    try t.setAttribute(.{ .bold = {} });
+    try t.printString("ABC");
+    t.setCursorPos(1, 1);
+    try t.print('Z');
+
+    const list_cell = t.screens.active.pages.getCell(.{ .screen = .{ .x = 0, .y = 0 } }).?;
+    const row = list_cell.row;
+    const cell = list_cell.cell;
+    try testing.expect(row.styled);
+    try testing.expectEqual(@as(u21, 'Z'), cell.content.codepoint);
+    try testing.expectEqual(Cell.Wide.narrow, cell.wide);
+    try testing.expect(cell.style_id != style.default_id);
 }
 
 test "Terminal: print over cell with same hyperlink" {
