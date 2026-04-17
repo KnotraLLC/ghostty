@@ -107,7 +107,7 @@ pub fn recordVtWrite(started: ?std.time.Instant, bytes: usize) void {
     state.vt_write_calls += 1;
     state.vt_write_ns += elapsed_ns;
 
-    emitLocked();
+    emitLocked(false);
 }
 
 pub fn recordGrow(path: GrowPath) void {
@@ -132,6 +132,14 @@ pub fn recordIncreaseCapacity() void {
 }
 
 pub fn recordAction(action: Action, started: ?std.time.Instant) void {
+    recordActionBatch(action, 1, started);
+}
+
+pub fn recordActionBatch(
+    action: Action,
+    count: usize,
+    started: ?std.time.Instant,
+) void {
     if (!enabled()) return;
 
     const elapsed_ns = elapsed: {
@@ -143,33 +151,34 @@ pub fn recordAction(action: Action, started: ?std.time.Instant) void {
     mutex.lock();
     defer mutex.unlock();
 
+    const count_u64: u64 = @intCast(count);
     switch (action) {
         .print => {
-            state.action_print += 1;
+            state.action_print += count_u64;
             state.action_print_ns += elapsed_ns;
         },
         .carriage_return => {
-            state.action_carriage_return += 1;
+            state.action_carriage_return += count_u64;
             state.action_carriage_return_ns += elapsed_ns;
         },
         .linefeed => {
-            state.action_linefeed += 1;
+            state.action_linefeed += count_u64;
             state.action_linefeed_ns += elapsed_ns;
         },
         .index => {
-            state.action_index += 1;
+            state.action_index += count_u64;
             state.action_index_ns += elapsed_ns;
         },
         .set_attribute => {
-            state.action_set_attribute += 1;
+            state.action_set_attribute += count_u64;
             state.action_set_attribute_ns += elapsed_ns;
         },
         .cursor_down_scroll => {
-            state.action_cursor_down_scroll += 1;
+            state.action_cursor_down_scroll += count_u64;
             state.action_cursor_down_scroll_ns += elapsed_ns;
         },
         .cursor_scroll_above => {
-            state.action_cursor_scroll_above += 1;
+            state.action_cursor_scroll_above += count_u64;
             state.action_cursor_scroll_above_ns += elapsed_ns;
         },
     }
@@ -219,8 +228,25 @@ pub fn recordScrollStage(stage: ScrollStage, started: ?std.time.Instant) void {
     }
 }
 
-fn emitLocked() void {
-    if (state.bytes_since_report < report_bytes) return;
+pub fn reset() void {
+    if (!enabled()) return;
+
+    mutex.lock();
+    defer mutex.unlock();
+    state = .{ .enabled = true };
+}
+
+pub fn emitNow() void {
+    if (!enabled()) return;
+
+    mutex.lock();
+    defer mutex.unlock();
+    emitLocked(true);
+}
+
+fn emitLocked(force: bool) void {
+    if (!force and state.bytes_since_report < report_bytes) return;
+    if (state.total_bytes == 0 and state.vt_write_calls == 0) return;
 
     const vt_write_ms = @as(f64, @floatFromInt(state.vt_write_ns)) / @as(f64, std.time.ns_per_ms);
     std.debug.print(

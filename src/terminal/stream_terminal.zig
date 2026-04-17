@@ -122,7 +122,15 @@ pub const Handler = struct {
 
     pub fn printMany(self: *Handler, cps: []const u32) void {
         if (perf.enabled()) {
-            for (cps) |cp| self.vt(.print, .{ .cp = @intCast(cp) });
+            const started = perf.start();
+            defer perf.recordActionBatch(.print, cps.len, started);
+
+            for (cps) |cp| {
+                self.terminal.print(@intCast(cp)) catch |err| {
+                    log.warn("error handling VT print batch err={}", .{err});
+                    return;
+                };
+            }
             return;
         }
 

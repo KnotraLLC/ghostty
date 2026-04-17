@@ -12,6 +12,7 @@ const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
 const Terminal = terminalpkg.Terminal;
 const Stream = terminalpkg.TerminalStream;
+const perf = @import("../terminal/perf.zig");
 
 const log = std.log.scoped(.@"terminal-vt-bench");
 
@@ -74,6 +75,7 @@ pub fn benchmark(self: *TerminalVt) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *TerminalVt = @ptrCast(@alignCast(ptr));
 
+    perf.reset();
     self.terminal.fullReset();
 
     // Recreate the stream so parser state starts clean for each run.
@@ -93,6 +95,7 @@ fn teardown(ptr: *anyopaque) void {
         f.close();
         self.data_f = null;
     }
+    perf.emitNow();
 }
 
 fn step(ptr: *anyopaque) Benchmark.Error!void {
@@ -110,7 +113,13 @@ fn step(ptr: *anyopaque) Benchmark.Error!void {
             return error.BenchmarkFailed;
         };
         if (n == 0) break;
-        self.stream.nextSlice(buf[0..n]);
+        if (perf.enabled()) {
+            const started = perf.start();
+            self.stream.nextSlice(buf[0..n]);
+            perf.recordVtWrite(started, n);
+        } else {
+            self.stream.nextSlice(buf[0..n]);
+        }
     }
 }
 
