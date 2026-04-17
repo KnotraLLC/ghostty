@@ -3304,7 +3304,9 @@ pub fn increaseCapacity(
         },
     };
 
-    log.info("adjusting page capacity={}", .{cap});
+    // Capacity growth can be hot on style/grapheme-heavy workloads, so keep
+    // this out of the default info log path.
+    log.debug("adjusting page capacity={}", .{cap});
 
     // Create our new page and clone the old page into it.
     const new_node = try self.createPage(cap);

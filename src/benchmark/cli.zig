@@ -11,6 +11,7 @@ pub const Action = enum {
     @"screen-clone",
     @"terminal-parser",
     @"terminal-stream",
+    @"terminal-vt",
     @"is-symbol",
     @"osc-parser",
 
@@ -26,6 +27,7 @@ pub const Action = enum {
         return switch (action) {
             .@"screen-clone" => @import("ScreenClone.zig"),
             .@"terminal-stream" => @import("TerminalStream.zig"),
+            .@"terminal-vt" => @import("TerminalVt.zig"),
             .@"codepoint-width" => @import("CodepointWidth.zig"),
             .@"grapheme-break" => @import("GraphemeBreak.zig"),
             .@"terminal-parser" => @import("TerminalParser.zig"),

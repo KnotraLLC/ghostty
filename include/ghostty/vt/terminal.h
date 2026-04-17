@@ -167,7 +167,12 @@ typedef struct {
   /** Terminal height in cells. Must be greater than zero. */
   uint16_t rows;
 
-  /** Maximum number of lines to keep in scrollback history. */
+  /**
+   * Maximum scrollback budget in bytes.
+   *
+   * Zero disables scrollback entirely. Nonzero values are rounded/clamped
+   * internally to satisfy the active area and page layout requirements.
+   */
   size_t max_scrollback;
 
   // TODO: Consider ABI compatibility implications of this struct.
