@@ -11,6 +11,7 @@ const Screen = @import("Screen.zig");
 const modes = @import("modes.zig");
 const osc_color = @import("osc/parsers/color.zig");
 const kitty_color = @import("kitty/color.zig");
+const perf = @import("perf.zig");
 const size_report = @import("size_report.zig");
 const Terminal = @import("Terminal.zig");
 
@@ -125,12 +126,28 @@ pub const Handler = struct {
         value: Action.Value(action),
     ) !void {
         switch (action) {
-            .print => try self.terminal.print(value.cp),
+            .print => {
+                const started = perf.start();
+                defer perf.recordAction(.print, started);
+                try self.terminal.print(value.cp);
+            },
             .print_repeat => try self.terminal.printRepeat(value),
             .backspace => self.terminal.backspace(),
-            .carriage_return => self.terminal.carriageReturn(),
-            .linefeed => try self.terminal.linefeed(),
-            .index => try self.terminal.index(),
+            .carriage_return => {
+                const started = perf.start();
+                defer perf.recordAction(.carriage_return, started);
+                self.terminal.carriageReturn();
+            },
+            .linefeed => {
+                const started = perf.start();
+                defer perf.recordAction(.linefeed, started);
+                try self.terminal.linefeed();
+            },
+            .index => {
+                const started = perf.start();
+                defer perf.recordAction(.index, started);
+                try self.terminal.index();
+            },
             .next_line => {
                 try self.terminal.index();
                 self.terminal.carriageReturn();
@@ -208,7 +225,11 @@ pub const Handler = struct {
             .configure_charset => self.terminal.configureCharset(value.slot, value.charset),
             .set_attribute => switch (value) {
                 .unknown => {},
-                else => self.terminal.setAttribute(value) catch {},
+                else => {
+                    const started = perf.start();
+                    defer perf.recordAction(.set_attribute, started);
+                    self.terminal.setAttribute(value) catch {};
+                },
             },
             .protected_mode_off => self.terminal.setProtectedMode(.off),
             .protected_mode_iso => self.terminal.setProtectedMode(.iso),

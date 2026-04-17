@@ -8,6 +8,7 @@ const ansi = @import("ansi.zig");
 const charsets = @import("charsets.zig");
 const fastmem = @import("../fastmem.zig");
 const kitty = @import("kitty.zig");
+const perf = @import("perf.zig");
 const sgr = @import("sgr.zig");
 const tripwire = @import("../tripwire.zig");
 const unicode = @import("../unicode/main.zig");
@@ -793,6 +794,8 @@ pub fn cursorReload(self: *Screen) void {
 /// Scroll the active area and keep the cursor at the bottom of the screen.
 /// This is a very specialized function but it keeps it fast.
 pub fn cursorDownScroll(self: *Screen) !void {
+    const started = perf.start();
+    defer perf.recordAction(.cursor_down_scroll, started);
     assert(self.cursor.y == self.pages.rows - 1);
     defer self.assertIntegrity();
 
@@ -808,11 +811,15 @@ pub fn cursorDownScroll(self: *Screen) !void {
         // the cells.
         if (self.pages.rows == 1) {
             const page: *Page = &self.cursor.page_pin.node.data;
-            self.clearCells(
-                page,
-                self.cursor.page_row,
-                page.getCells(self.cursor.page_row),
-            );
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.clear, stage_started);
+                self.clearCells(
+                    page,
+                    self.cursor.page_row,
+                    page.getCells(self.cursor.page_row),
+                );
+            }
             self.cursorMarkDirty();
         } else {
             // The call to `eraseRow` will move the tracked cursor pin up by one
@@ -821,7 +828,11 @@ pub fn cursorDownScroll(self: *Screen) !void {
             const old_pin = self.cursor.page_pin.*;
 
             // eraseRow will shift everything below it up.
-            try self.pages.eraseRow(.{ .active = .{} });
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.clear, stage_started);
+                try self.pages.eraseRow(.{ .active = .{} });
+            }
 
             // Note we don't need to mark anything dirty in this branch
             // because eraseRow will mark all the rotated rows as dirty
@@ -833,63 +844,87 @@ pub fn cursorDownScroll(self: *Screen) !void {
 
             // We do, however, need to refresh the cached page row
             // and cell, because `eraseRow` will have moved the row.
-            const page_rac = self.cursor.page_pin.rowAndCell();
-            self.cursor.page_row = page_rac.row;
-            self.cursor.page_cell = page_rac.cell;
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.cache, stage_started);
+                const page_rac = self.cursor.page_pin.rowAndCell();
+                self.cursor.page_row = page_rac.row;
+                self.cursor.page_cell = page_rac.cell;
+            }
         }
     } else {
         const old_pin = self.cursor.page_pin.*;
 
         // Grow our pages by one row. The PageList will handle if we need to
         // allocate, prune scrollback, whatever.
-        _ = try self.pages.grow();
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.grow, stage_started);
+            _ = try self.pages.grow();
+        }
 
-        self.cursorChangePin(new_pin: {
-            // We do this all in a block here because referencing this pin
-            // after cursorChangePin is unsafe, and we want to keep it out
-            // of scope.
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.pin, stage_started);
+            self.cursorChangePin(new_pin: {
+                // We do this all in a block here because referencing this pin
+                // after cursorChangePin is unsafe, and we want to keep it out
+                // of scope.
 
-            // If our pin page change it means that the page that the pin
-            // was on was pruned. In this case, grow() moves the pin to
-            // the top-left of the new page. This effectively moves it by
-            // one already, we just need to fix up the x value.
-            const page_pin = if (old_pin.node == self.cursor.page_pin.node)
-                self.cursor.page_pin.down(1).?
-            else reuse: {
-                var pin = self.cursor.page_pin.*;
-                pin.x = self.cursor.x;
-                break :reuse pin;
-            };
+                // If our pin page change it means that the page that the pin
+                // was on was pruned. In this case, grow() moves the pin to
+                // the top-left of the new page. This effectively moves it by
+                // one already, we just need to fix up the x value.
+                const page_pin = if (old_pin.node == self.cursor.page_pin.node)
+                    self.cursor.page_pin.down(1).?
+                else reuse: {
+                    var pin = self.cursor.page_pin.*;
+                    pin.x = self.cursor.x;
+                    break :reuse pin;
+                };
 
-            // These assertions help catch some pagelist math errors. Our
-            // x/y should be unchanged after the grow.
-            if (build_options.slow_runtime_safety) {
-                const active = self.pages.pointFromPin(
-                    .active,
-                    page_pin,
-                ).?.active;
-                assert(active.x == self.cursor.x);
-                assert(active.y == self.cursor.y);
-            }
+                // These assertions help catch some pagelist math errors. Our
+                // x/y should be unchanged after the grow.
+                if (build_options.slow_runtime_safety) {
+                    const active = self.pages.pointFromPin(
+                        .active,
+                        page_pin,
+                    ).?.active;
+                    assert(active.x == self.cursor.x);
+                    assert(active.y == self.cursor.y);
+                }
 
-            break :new_pin page_pin;
-        });
-        const page_rac = self.cursor.page_pin.rowAndCell();
-        self.cursor.page_row = page_rac.row;
-        self.cursor.page_cell = page_rac.cell;
+                break :new_pin page_pin;
+            });
+        }
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.cache, stage_started);
+            const page_rac = self.cursor.page_pin.rowAndCell();
+            self.cursor.page_row = page_rac.row;
+            self.cursor.page_cell = page_rac.cell;
+        }
 
         // Our new row is always dirty
-        self.cursorMarkDirty();
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.mark_dirty, stage_started);
+            self.cursorMarkDirty();
+        }
 
         // Clear the new row so it gets our bg color. We only do this
         // if we have a bg color at all.
         if (self.cursor.style.bg_color != .none) {
             const page: *Page = &self.cursor.page_pin.node.data;
-            self.clearCells(
-                page,
-                self.cursor.page_row,
-                page.getCells(self.cursor.page_row),
-            );
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.clear, stage_started);
+                self.clearCells(
+                    page,
+                    self.cursor.page_row,
+                    page.getCells(self.cursor.page_row),
+                );
+            }
         }
     }
 
@@ -897,6 +932,8 @@ pub fn cursorDownScroll(self: *Screen) !void {
         // The newly created line needs to be styled according to
         // the bg color if it is set.
         if (self.cursor.style.bgCell()) |blank_cell| {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.style_fill, stage_started);
             const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
             const cells = cell_current - self.cursor.x;
             @memset(cells[0..self.pages.cols], blank_cell);
@@ -907,6 +944,8 @@ pub fn cursorDownScroll(self: *Screen) !void {
 /// This scrolls the active area at and above the cursor.
 /// The lines below the cursor are not scrolled.
 pub fn cursorScrollAbove(self: *Screen) !void {
+    const started = perf.start();
+    defer perf.recordAction(.cursor_scroll_above, started);
     // We unconditionally mark the cursor row as dirty here because
     // the cursor always changes page rows inside this function, and
     // when that happens it can mean the text in the old row needs to
@@ -934,6 +973,8 @@ pub fn cursorScrollAbove(self: *Screen) !void {
 
     const old_pin = self.cursor.page_pin.*;
     if (try self.pages.grow()) |_| {
+        const stage_started = perf.start();
+        defer perf.recordScrollStage(.rotate, stage_started);
         try self.cursorScrollAboveRotate();
     } else {
         // In this case, it means grow() didn't allocate a new page.
@@ -953,8 +994,12 @@ pub fn cursorScrollAbove(self: *Screen) !void {
 
             // Rotate the rows so that the newly created empty row is at the
             // beginning. e.g. [ 0 1 2 3 ] in to [ 3 0 1 2 ].
-            var rows = page.rows.ptr(page.memory.ptr);
-            fastmem.rotateOnceR(Row, rows[pin.y..page.size.rows]);
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.rotate, stage_started);
+                var rows = page.rows.ptr(page.memory.ptr);
+                fastmem.rotateOnceR(Row, rows[pin.y..page.size.rows]);
+            }
 
             // Mark the whole page as dirty.
             //
@@ -964,9 +1009,13 @@ pub fn cursorScrollAbove(self: *Screen) !void {
 
             // Setup our cursor caches after the rotation so it points to the
             // correct data
-            const page_rac = self.cursor.page_pin.rowAndCell();
-            self.cursor.page_row = page_rac.row;
-            self.cursor.page_cell = page_rac.cell;
+            {
+                const stage_started = perf.start();
+                defer perf.recordScrollStage(.cache, stage_started);
+                const page_rac = self.cursor.page_pin.rowAndCell();
+                self.cursor.page_row = page_rac.row;
+                self.cursor.page_cell = page_rac.cell;
+            }
         } else {
             // We didn't grow pages but our cursor isn't on the last page.
             // In this case we need to do more work because we need to copy
@@ -1003,7 +1052,11 @@ pub fn cursorScrollAbove(self: *Screen) !void {
 }
 
 fn cursorScrollAboveRotate(self: *Screen) !void {
-    self.cursorChangePin(self.cursor.page_pin.down(1).?);
+    {
+        const stage_started = perf.start();
+        defer perf.recordScrollStage(.pin, stage_started);
+        self.cursorChangePin(self.cursor.page_pin.down(1).?);
+    }
 
     // Go through each of the pages following our pin, shift all rows
     // down by one, and copy the last row of the previous page.
@@ -1016,14 +1069,22 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
         const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
 
         // Rotate the pages down: [ 0 1 2 3 ] => [ 3 0 1 2 ]
-        fastmem.rotateOnceR(Row, cur_rows[0..cur_page.size.rows]);
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.rotate, stage_started);
+            fastmem.rotateOnceR(Row, cur_rows[0..cur_page.size.rows]);
+        }
 
         // Copy the last row of the previous page to the top of current.
-        try cur_page.cloneRowFrom(
-            prev_page,
-            &cur_rows[0],
-            &prev_rows[prev_page.size.rows - 1],
-        );
+        {
+            const stage_started = perf.start();
+            defer perf.recordScrollStage(.clear, stage_started);
+            try cur_page.cloneRowFrom(
+                prev_page,
+                &cur_rows[0],
+                &prev_rows[prev_page.size.rows - 1],
+            );
+        }
 
         // Mark dirty on the page, since we are dirtying all rows with this.
         cur_page.dirty = true;
@@ -1034,12 +1095,20 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
     assert(current == self.cursor.page_pin.node);
     const cur_page = &current.data;
     const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
-    fastmem.rotateOnceR(Row, cur_rows[self.cursor.page_pin.y..cur_page.size.rows]);
-    self.clearCells(
-        cur_page,
-        &cur_rows[self.cursor.page_pin.y],
-        cur_page.getCells(&cur_rows[self.cursor.page_pin.y]),
-    );
+    {
+        const stage_started = perf.start();
+        defer perf.recordScrollStage(.rotate, stage_started);
+        fastmem.rotateOnceR(Row, cur_rows[self.cursor.page_pin.y..cur_page.size.rows]);
+    }
+    {
+        const stage_started = perf.start();
+        defer perf.recordScrollStage(.clear, stage_started);
+        self.clearCells(
+            cur_page,
+            &cur_rows[self.cursor.page_pin.y],
+            cur_page.getCells(&cur_rows[self.cursor.page_pin.y]),
+        );
+    }
 
     // Mark the whole page as dirty.
     //
@@ -1049,9 +1118,13 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
 
     // Setup cursor cache data after all the rotations so our
     // row is valid.
-    const page_rac = self.cursor.page_pin.rowAndCell();
-    self.cursor.page_row = page_rac.row;
-    self.cursor.page_cell = page_rac.cell;
+    {
+        const stage_started = perf.start();
+        defer perf.recordScrollStage(.cache, stage_started);
+        const page_rac = self.cursor.page_pin.rowAndCell();
+        self.cursor.page_row = page_rac.row;
+        self.cursor.page_cell = page_rac.cell;
+    }
 }
 
 /// Move the cursor down if we're not at the bottom of the screen. Otherwise
