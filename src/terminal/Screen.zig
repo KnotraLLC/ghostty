@@ -798,6 +798,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
     defer perf.recordAction(.cursor_down_scroll, started);
     assert(self.cursor.y == self.pages.rows - 1);
     defer self.assertIntegrity();
+    var needs_style_fill = false;
 
     if (comptime build_options.kitty_graphics) {
         // Scrolling dirties the images because it updates their placements pins.
@@ -821,6 +822,7 @@ pub fn cursorDownScroll(self: *Screen) !void {
                 );
             }
             self.cursorMarkDirty();
+            needs_style_fill = false;
         } else {
             // The call to `eraseRow` will move the tracked cursor pin up by one
             // row, but we don't actually want that, so we keep the old pin and
@@ -851,6 +853,8 @@ pub fn cursorDownScroll(self: *Screen) !void {
                 self.cursor.page_row = page_rac.row;
                 self.cursor.page_cell = page_rac.cell;
             }
+
+            needs_style_fill = true;
         }
     } else {
         const old_pin = self.cursor.page_pin.*;
@@ -925,10 +929,13 @@ pub fn cursorDownScroll(self: *Screen) !void {
                     page.getCells(self.cursor.page_row),
                 );
             }
+            needs_style_fill = false;
+        } else {
+            needs_style_fill = self.cursor.style_id != style.default_id;
         }
     }
 
-    if (self.cursor.style_id != style.default_id) {
+    if (needs_style_fill and self.cursor.style_id != style.default_id) {
         // The newly created line needs to be styled according to
         // the bg color if it is set.
         if (self.cursor.style.bgCell()) |blank_cell| {
@@ -976,6 +983,16 @@ pub fn cursorScrollAbove(self: *Screen) !void {
         const stage_started = perf.start();
         defer perf.recordScrollStage(.rotate, stage_started);
         try self.cursorScrollAboveRotate();
+        if (self.cursor.style_id != style.default_id) {
+            // The newly created line needs to be styled according to
+            // the bg color if it is set.
+            if (self.cursor.style.bgCell()) |blank_cell| {
+                const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+                const cells = cell_current - self.cursor.x;
+                @memset(cells[0..self.pages.cols], blank_cell);
+            }
+        }
+        return;
     } else {
         // In this case, it means grow() didn't allocate a new page.
 
@@ -1016,6 +1033,17 @@ pub fn cursorScrollAbove(self: *Screen) !void {
                 self.cursor.page_row = page_rac.row;
                 self.cursor.page_cell = page_rac.cell;
             }
+
+            if (self.cursor.style_id != style.default_id) {
+                // The newly created line needs to be styled according to
+                // the bg color if it is set.
+                if (self.cursor.style.bgCell()) |blank_cell| {
+                    const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
+                    const cells = cell_current - self.cursor.x;
+                    @memset(cells[0..self.pages.cols], blank_cell);
+                }
+            }
+            return;
         } else {
             // We didn't grow pages but our cursor isn't on the last page.
             // In this case we need to do more work because we need to copy
@@ -1037,16 +1065,6 @@ pub fn cursorScrollAbove(self: *Screen) !void {
             //      +----------+ :
             //     +-------------+
             try self.cursorScrollAboveRotate();
-        }
-    }
-
-    if (self.cursor.style_id != style.default_id) {
-        // The newly created line needs to be styled according to
-        // the bg color if it is set.
-        if (self.cursor.style.bgCell()) |blank_cell| {
-            const cell_current: [*]pagepkg.Cell = @ptrCast(self.cursor.page_cell);
-            const cells = cell_current - self.cursor.x;
-            @memset(cells[0..self.pages.cols], blank_cell);
         }
     }
 }
