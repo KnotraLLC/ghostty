@@ -1429,7 +1429,14 @@ pub const StreamHandler = struct {
     ) !void {
         switch (cmd.action) {
             .end_input_start_output => {
-                self.surfaceMessageWriter(.start_command);
+                // Decode bounded cmdline metadata for the embedder.
+                // Truncated prefix on overflow or decode error; all
+                // zeros when the sequence carries no cmdline.
+                var cmdline: [511:0]u8 = @splat(0);
+                var writer = std.Io.Writer.fixed(cmdline[0..511]);
+                cmd.writeCommandLine(&writer) catch {};
+                cmdline[writer.end] = 0;
+                self.surfaceMessageWriter(.{ .start_command = cmdline });
             },
 
             .end_command => {
