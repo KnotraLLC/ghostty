@@ -482,6 +482,10 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
+    /// Owned container for structured argv (see Options.command_argv).
+    /// Strings are borrowed from the caller; only the array is owned.
+    command_argv_mem: ?[][:0]const u8 = null,
+
     /// Surface initialization options.
     pub const Options = extern struct {
         /// The platform that this surface is being initialized for and
@@ -523,6 +527,17 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// Structured argv for direct execution without a shell. When
+        /// command_argc > 0 this takes precedence over `command`.
+        /// argv[0] must be the executable; empty individual arguments
+        /// are preserved. Spaces, quotes, and shell metacharacters stay
+        /// literal. Individual strings are borrowed (same lifetime
+        /// contract as `command`: valid for the surface lifetime); the
+        /// array container is copied. Empty argv, null entries, and an
+        /// empty argv[0] are rejected with error.InvalidCommandArgv.
+        command_argv: ?[*]?[*:0]const u8 = null,
+        command_argc: usize = 0,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -588,8 +603,24 @@ pub const Surface = struct {
             }
         }
 
-        // If we have a command from the options then we set it.
-        if (opts.command) |c_command| {
+        // Structured argv takes precedence over the legacy shell string.
+        // This maps to Ghostty's direct-execution model: no shell parsing
+        // or interpolation.
+        if (opts.command_argc > 0) {
+            const argv_in = opts.command_argv orelse return error.InvalidCommandArgv;
+            const container = try app.core_app.alloc.alloc([:0]const u8, opts.command_argc);
+            // Assign immediately: newSurface runs deinit on any later
+            // init failure, which frees this. Strings stay borrowed.
+            self.command_argv_mem = container;
+            for (argv_in[0..opts.command_argc], 0..) |c_arg, i| {
+                const arg = c_arg orelse return error.InvalidCommandArgv;
+                container[i] = std.mem.span(arg);
+            }
+            if (container[0].len == 0) return error.InvalidCommandArgv;
+            config.command = .{ .direct = container };
+            config.@"wait-after-command" = true;
+        } else if (opts.command) |c_command| {
+            // If we have a command from the options then we set it.
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
                 config.command = .{ .shell = cmd };
@@ -674,6 +705,12 @@ pub const Surface = struct {
 
         // Free our title
         if (self.title) |v| self.app.core_app.alloc.free(v);
+
+        // Free our structured argv container (strings are borrowed).
+        if (self.command_argv_mem) |v| {
+            self.app.core_app.alloc.free(v);
+            self.command_argv_mem = null;
+        }
 
         // Remove ourselves from the list of known surfaces in the app.
         self.app.core_app.deleteSurface(self);
