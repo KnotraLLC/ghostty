@@ -88,7 +88,7 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
     );
 
     const ViewInfo = struct {
-        view: objc.Object,
+        view: ?objc.Object,
         scaleFactor: f64,
     };
 
@@ -99,6 +99,11 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
             .view = switch (opts.rt_surface.platform) {
                 .macos => |v| v.nsview,
                 .ios => |v| v.uiview,
+                // Headless surfaces have no view; the IOSurfaceLayer
+                // still holds the presented frame so embedders can read
+                // it back (or import the IOSurface into their own
+                // compositor).
+                .headless => null,
             },
         },
 
@@ -119,23 +124,25 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
     //
     // On iOS, views are always layer-backed, and `layer`
     // is readonly, so instead we add it as a sublayer.
-    switch (comptime builtin.os.tag) {
+    //
+    // Headless surfaces have no view: the layer stands alone.
+    if (info.view) |view| switch (comptime builtin.os.tag) {
         .macos => {
-            info.view.setProperty("layer", layer.layer.value);
-            info.view.setProperty("wantsLayer", true);
+            view.setProperty("layer", layer.layer.value);
+            view.setProperty("wantsLayer", true);
         },
 
         .ios => {
-            const view_layer = objc.Object.fromId(info.view.getProperty(?*anyopaque, "layer"));
+            const view_layer = objc.Object.fromId(view.getProperty(?*anyopaque, "layer"));
             view_layer.msgSend(void, objc.sel("addSublayer:"), .{layer.layer.value});
         },
 
         else => @compileError("unsupported target for Metal"),
-    }
+    };
 
     // Ensure that if our layer is oversized it
     // does not overflow the bounds of the view.
-    info.view.setProperty("clipsToBounds", true);
+    if (info.view) |view| view.setProperty("clipsToBounds", true);
 
     // Ensure that our layer has a content scale set to
     // match the scale factor of the window. This avoids
@@ -210,6 +217,25 @@ pub fn initShaders(
         else
             mtl.MTLPixelFormat.bgra8unorm,
     );
+}
+
+/// Set the layer bounds directly. This is used by headless surfaces,
+/// which have no view hierarchy to lay the layer out: the renderer
+/// derives its target size from the layer bounds (see surfaceSize),
+/// so without this a headless surface would render at 0x0.
+///
+/// width/height are in pixels; bounds are points, so we divide by
+/// the layer's contentsScale.
+pub fn setLayerSize(self: *const Metal, width_px: u32, height_px: u32) void {
+    const scale = self.layer.layer.getProperty(f64, "contentsScale");
+    const bounds: graphics.Rect = .{
+        .origin = .{ .x = 0, .y = 0 },
+        .size = .{
+            .width = @as(f64, @floatFromInt(width_px)) / scale,
+            .height = @as(f64, @floatFromInt(height_px)) / scale,
+        },
+    };
+    self.layer.layer.setProperty("bounds", bounds);
 }
 
 /// Get the current size of the runtime surface.

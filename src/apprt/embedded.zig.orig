@@ -9,8 +9,6 @@ const builtin = @import("builtin");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const objc = @import("objc");
-const macos_pkg = @import("macos");
-const graphics = macos_pkg.graphics;
 const apprt = @import("../apprt.zig");
 const font = @import("../font/main.zig");
 const global = @import("../global.zig");
@@ -384,7 +382,6 @@ pub const App = struct {
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
     ios: IOS,
-    headless: Headless,
 
     // If our build target for libghostty is not darwin then we do
     // not include macos support at all.
@@ -398,14 +395,6 @@ pub const Platform = union(PlatformTag) {
         uiview: objc.Object,
     } else void;
 
-    /// Headless: no view at all. The renderer draws into offscreen
-    /// targets (IOSurfaces on macOS) and the embedder reads presented
-    /// frames via ghostty_surface_headless_frame(). This exists so
-    /// embedders that composite frames themselves (e.g. via Electron's
-    /// sharedTexture module) can reuse Ghostty's renderer without
-    /// providing a native view hierarchy.
-    pub const Headless = struct {};
-
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.
     pub const C = extern union {
@@ -415,10 +404,6 @@ pub const Platform = union(PlatformTag) {
 
         ios: extern struct {
             uiview: ?*anyopaque,
-        },
-
-        headless: extern struct {
-            reserved: ?*anyopaque,
         },
     };
 
@@ -439,14 +424,6 @@ pub const Platform = union(PlatformTag) {
                     break :ios error.UIViewMustBeSet);
                 break :ios .{ .ios = .{ .uiview = uiview } };
             } else error.UnsupportedPlatform,
-
-            // Headless currently requires the Metal renderer's
-            // IOSurfaceLayer (Darwin): reject cleanly on other targets
-            // instead of panicking at the first GL call.
-            .headless => if (comptime builtin.target.os.tag.isDarwin())
-                .{ .headless = .{} }
-            else
-                error.UnsupportedPlatform,
         };
     }
 };
@@ -457,7 +434,6 @@ pub const PlatformTag = enum(c_int) {
 
     macos = 1,
     ios = 2,
-    headless = 3,
 };
 
 pub const EnvVar = extern struct {
@@ -646,19 +622,6 @@ pub const Surface = struct {
             self,
         );
         errdefer self.core_surface.deinit();
-
-        // Headless surfaces have no view to lay out the renderer's
-        // layer, so give it our initial size directly. (updateSize
-        // early-returns when the requested size equals the default,
-        // so this can't be deferred to the first set_size call.)
-        if (comptime builtin.target.os.tag.isDarwin()) {
-            if (self.platform == .headless) {
-                self.core_surface.renderer.api.setLayerSize(
-                    self.size.width,
-                    self.size.height,
-                );
-            }
-        }
 
         // If our options requested a specific font-size, set that.
         if (opts.font_size != 0) {
@@ -1069,15 +1032,6 @@ pub const Surface = struct {
             .width = width,
             .height = height,
         };
-
-        // Headless surfaces have no view to lay out the renderer's
-        // layer, so we size it directly; the renderer derives its
-        // render target size from the layer bounds.
-        if (comptime builtin.target.os.tag.isDarwin()) {
-            if (self.platform == .headless) {
-                self.core_surface.renderer.api.setLayerSize(width, height);
-            }
-        }
 
         // Call the primary callback.
         self.core_surface.sizeCallback(self.size) catch |err| {
@@ -1995,59 +1949,6 @@ pub const CAPI = struct {
     /// call as soon as possible (NOW if possible).
     export fn ghostty_surface_draw(surface: *Surface) void {
         surface.draw();
-    }
-
-    /// The last presented frame of a headless surface.
-    /// C type: ghostty_headless_frame_s
-    const HeadlessFrame = extern struct {
-        /// IOSurfaceRef of the last presented frame, retained (+1);
-        /// the caller must CFRelease it. Null if no frame has been
-        /// presented yet or this isn't a Darwin build.
-        iosurface: ?*anyopaque,
-        width_px: u32,
-        height_px: u32,
-        scale: f64,
-    };
-
-    /// Returns the last presented frame of a headless surface. Only
-    /// meaningful for surfaces created with the headless platform tag,
-    /// but safe to call on any surface (frames are presented to the
-    /// same layer in all cases).
-    ///
-    /// The frame is the renderer's most recently presented render
-    /// target. Ghostty triple-buffers, so the returned IOSurface will
-    /// not be drawn into again until two more frames are presented;
-    /// callers that need the pixels for longer should copy or import
-    /// the surface promptly. Call ghostty_surface_draw() first to force
-    /// a synchronous present of any pending frame.
-    export fn ghostty_surface_headless_frame(surface: *Surface) HeadlessFrame {
-        if (comptime builtin.target.os.tag.isDarwin()) {
-            const layer = surface.core_surface.renderer.api.layer.layer;
-            const contents = layer.getProperty(?*anyopaque, "contents");
-            if (contents) |ptr| {
-                // Retain for the caller. The layer holds its own
-                // reference; ours guarantees validity after the layer
-                // moves on.
-                const CFRetain = @extern(
-                    *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
-                    .{ .name = "CFRetain" },
-                );
-                _ = CFRetain(ptr);
-            }
-            const scale = layer.getProperty(f64, "contentsScale");
-            const bounds = layer.getProperty(graphics.Rect, "bounds");
-            return .{
-                .iosurface = contents,
-                .width_px = @intFromFloat(@round(bounds.size.width * scale)),
-                .height_px = @intFromFloat(@round(bounds.size.height * scale)),
-                .scale = scale,
-            };
-        } else return .{
-            .iosurface = null,
-            .width_px = 0,
-            .height_px = 0,
-            .scale = 1,
-        };
     }
 
     /// Update the size of a surface. This will trigger resize notifications
