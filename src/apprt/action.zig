@@ -363,6 +363,10 @@ pub const Action = union(Key) {
     /// and apprts may ignore it, for example if the surface is in a
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
+    /// A command has started. Carries bounded OSC 133 cmdline metadata
+    /// (possibly empty). Embedders use this for command tracking without
+    /// parsing terminal output. Appended last for C union layout parity.
+    command_started: CommandStarted,
 
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
@@ -436,6 +440,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        command_started,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -1022,6 +1027,21 @@ pub const CommandFinished = struct {
         return .{
             .exit_code = self.exit_code orelse -1,
             .duration = self.duration.duration,
+        };
+    }
+};
+
+pub const CommandStarted = struct {
+    cmdline: [:0]const u8,
+
+    /// sync with ghostty_action_command_started_s in ghostty.h
+    pub const C = extern struct {
+        cmdline: [*:0]const u8,
+    };
+
+    pub fn cval(self: CommandStarted) C {
+        return .{
+            .cmdline = self.cmdline.ptr,
         };
     }
 };
