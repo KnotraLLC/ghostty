@@ -225,8 +225,6 @@ pub fn build(b: *std.Build) !void {
         const lib_shared = try buildpkg.GhosttyLib.initShared(b, &deps);
         const lib_static = try buildpkg.GhosttyLib.initStatic(b, &deps);
 
-        // We shouldn't have this guard but we don't currently
-        // build on macOS this way ironically so we need to fix that.
         if (!config.target.result.os.tag.isDarwin()) {
             lib_shared.installHeader(); // Only need one header
             if (config.target.result.os.tag == .windows) {
@@ -236,6 +234,12 @@ pub fn build(b: *std.Build) !void {
                 lib_shared.install("ghostty-internal.so");
                 lib_static.install("ghostty-internal.a");
             }
+        } else {
+            // On macOS install the static archive directly so embedders
+            // that aren't the Ghostty.app Xcode project (which consumes
+            // the xcframework) can link the full library.
+            lib_static.installHeader();
+            lib_static.install("libghostty.a");
         }
     }
 
