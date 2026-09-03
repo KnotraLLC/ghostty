@@ -537,6 +537,15 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  // Structured argv for direct execution without a shell. When
+  // command_argc > 0 this takes precedence over `command`. argv[0] is
+  // the executable; spaces, quotes, and shell metacharacters stay
+  // literal. Empty argv, null entries, and an empty argv[0] are
+  // rejected. Strings are borrowed for the surface lifetime; embedders
+  // must reject NUL-containing values before calling. Appended; never
+  // reorder above fields.
+  const char* const* command_argv;
+  size_t command_argc;
 } ghostty_surface_config_s;
 
 typedef struct {
