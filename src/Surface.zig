@@ -1143,8 +1143,15 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             try self.selectionScrollTick();
         },
 
-        .start_command => {
+        .start_command => |v| {
             self.command_timer = .now(global.io(), .awake);
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .command_started,
+                .{ .cmdline = std.mem.sliceTo(&v, 0) },
+            ) catch |err| {
+                log.warn("apprt failed to notify command start={}", .{err});
+            };
         },
 
         .stop_command => |v| timer: {

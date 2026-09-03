@@ -944,6 +944,14 @@ typedef struct {
   uint64_t duration;
 } ghostty_action_command_finished_s;
 
+// apprt.action.CommandStarted.C
+typedef struct {
+  // Decoded OSC 133 cmdline metadata, truncated to 511 bytes plus NUL.
+  // Empty string when the sequence carried none. Borrowed: valid only
+  // for the duration of the action callback.
+  const char* cmdline;
+} ghostty_action_command_started_s;
+
 // apprt.action.StartSearch.C
 typedef struct {
   const char* needle;
@@ -1037,6 +1045,7 @@ typedef enum {
   GHOSTTY_ACTION_READONLY,
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
+  GHOSTTY_ACTION_COMMAND_STARTED,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1080,6 +1089,7 @@ typedef union {
   ghostty_action_search_selected_s search_selected;
   ghostty_action_readonly_e readonly;
   ghostty_action_open_config_e open_config;
+  ghostty_action_command_started_s command_started;
 } ghostty_action_u;
 
 typedef struct {
