@@ -456,6 +456,8 @@ typedef struct {
   uintptr_t text_len;
 } ghostty_text_s;
 
+// A bounded plain-text snapshot of an active terminal screen. The text is at
+// most 64 KiB and is UTF-8, sentinel-terminated for C callers.
 typedef struct {
   uint16_t columns;
   uint16_t rows;
@@ -1283,9 +1285,13 @@ GHOSTTY_API bool ghostty_surface_read_text(ghostty_surface_t,
                                               ghostty_selection_s,
                                               ghostty_text_s*);
 GHOSTTY_API void ghostty_surface_free_text(ghostty_surface_t, ghostty_text_s*);
+// Reads a bounded active-screen snapshot. mode 0 is the cursor row and up to
+// five preceding rows; mode 1 is the whole active screen. On failure `result`
+// is zeroed. On success, call ghostty_surface_free_prompt_snapshot exactly once.
 GHOSTTY_API bool ghostty_surface_read_prompt_snapshot(ghostty_surface_t,
-                                                        uint8_t,
+                                                        uint8_t mode,
                                                         ghostty_prompt_snapshot_s*);
+// Frees a successful prompt snapshot and zeroes `result`.
 GHOSTTY_API void ghostty_surface_free_prompt_snapshot(ghostty_surface_t,
                                                         ghostty_prompt_snapshot_s*);
 
