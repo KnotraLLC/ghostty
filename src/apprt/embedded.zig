@@ -1659,6 +1659,24 @@ pub const CAPI = struct {
         }
     };
 
+    // ghostty_prompt_snapshot_s
+    const PromptSnapshot = extern struct {
+        columns: u16 = 0,
+        rows: u16 = 0,
+        cursor_col: u16 = 0,
+        cursor_row: u16 = 0,
+        first_row: u16 = 0,
+        row_count: u16 = 0,
+        pending_wrap: bool = false,
+        text: ?[*:0]const u8 = null,
+        text_len: usize = 0,
+
+        fn deinit(self: *PromptSnapshot) void {
+            if (self.text) |ptr| global.alloc().free(ptr[0..self.text_len :0]);
+            self.* = .{};
+        }
+    };
+
     // ghostty_point_s
     const Point = extern struct {
         tag: Tag,
@@ -2027,6 +2045,56 @@ pub const CAPI = struct {
 
     export fn ghostty_surface_free_text(_: *Surface, ptr: *Text) void {
         ptr.deinit();
+    }
+
+    /// Read a bounded plain-text snapshot of the active terminal screen.
+    /// Mode 0 selects the cursor row plus five preceding rows; mode 1 selects
+    /// the full active screen. The snapshot is copied only after formatting
+    /// succeeds while the renderer state remains locked.
+    export fn ghostty_surface_read_prompt_snapshot(
+        surface: *Surface,
+        mode: u8,
+        result: *PromptSnapshot,
+    ) bool {
+        result.* = .{};
+
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
+
+        var output: [terminal.prompt_snapshot.max_output_bytes]u8 = undefined;
+        const snapshot = terminal.prompt_snapshot.read(
+            core_surface.renderer_state.terminal.screens.active,
+            mode,
+            &output,
+        ) catch |err| {
+            log.warn("error reading prompt snapshot err={}", .{err});
+            return false;
+        };
+        const text = global.alloc().dupeZ(u8, snapshot.text) catch |err| {
+            log.warn("error allocating prompt snapshot err={}", .{err});
+            return false;
+        };
+
+        result.* = .{
+            .columns = snapshot.columns,
+            .rows = snapshot.rows,
+            .cursor_col = snapshot.cursor_col,
+            .cursor_row = snapshot.cursor_row,
+            .first_row = snapshot.first_row,
+            .row_count = snapshot.row_count,
+            .pending_wrap = snapshot.pending_wrap,
+            .text = text.ptr,
+            .text_len = snapshot.text.len,
+        };
+        return true;
+    }
+
+    export fn ghostty_surface_free_prompt_snapshot(
+        _: *Surface,
+        result: *PromptSnapshot,
+    ) void {
+        result.deinit();
     }
 
     /// Tell the surface that it needs to schedule a render
