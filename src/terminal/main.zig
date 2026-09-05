@@ -9,6 +9,7 @@ pub const apc = @import("apc.zig");
 pub const dcs = @import("dcs.zig");
 pub const osc = @import("osc.zig");
 pub const point = @import("point.zig");
+pub const prompt_snapshot = @import("prompt_snapshot.zig");
 pub const color = @import("color.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const device_attributes = @import("device_attributes.zig");
