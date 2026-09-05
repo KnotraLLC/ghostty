@@ -576,6 +576,11 @@ pub const Config = struct {
     resources_dir: ?[]const u8,
     term: []const u8,
 
+    /// Internal embedded policy for caller-supplied structured argv. This
+    /// preserves the direct child process on macOS rather than launching it
+    /// through the normal login wrapper.
+    bypass_macos_login: bool = false,
+
     rt_pre_exec_info: Command.RtPreExecInfo,
     rt_post_fork_info: Command.RtPostForkInfo,
 };
@@ -826,6 +831,7 @@ const Subprocess = struct {
             alloc,
             shell_command,
             internal_os.passwd,
+            cfg.bypass_macos_login,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -833,6 +839,10 @@ const Subprocess = struct {
             // Realistically, if you're getting OOM, I think other stuff is
             // about to crash, but we can try.
             error.OutOfMemory => oom: {
+                // A structured embedded launch must not replace its direct
+                // child with a fallback shell, which would lose its identity.
+                if (cfg.bypass_macos_login) return err;
+
                 log.warn("failed to allocate space for command args, falling back to basic shell", .{});
 
                 // The comptime here is important to ensure the full slice
@@ -845,6 +855,7 @@ const Subprocess = struct {
 
             // This logs on its own, this is a bad error.
             error.SystemError => return err,
+            error.InvalidBypassMacosLoginCommand => return err,
         };
 
         // We have to copy the cwd because there is no guarantee that
@@ -1840,11 +1851,22 @@ fn execCommand(
     alloc: Allocator,
     command: configpkg.Command,
     comptime passwdpkg: type,
-) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
+    bypass_macos_login: bool,
+) (Allocator.Error || error{
+    SystemError,
+    InvalidBypassMacosLoginCommand,
+})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set, a login shell, and proper
     // hushlogin behavior.
     if (comptime builtin.target.os.tag.isDarwin()) darwin: {
+        if (bypass_macos_login) {
+            return switch (command) {
+                .direct => (try command.clone(alloc)).direct,
+                .shell => error.InvalidBypassMacosLoginCommand,
+            };
+        }
+
         const passwd = passwdpkg.get(alloc) catch |err| {
             log.warn("failed to read passwd, not using a login shell err={}", .{err});
             break :darwin;
@@ -2073,7 +2095,7 @@ test "execCommand darwin: shell command" {
                 .name = "testuser",
             };
         }
-    });
+    }, false);
 
     try testing.expectEqual(8, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
@@ -2103,7 +2125,7 @@ test "execCommand darwin: direct command" {
                 .name = "testuser",
             };
         }
-    });
+    }, false);
 
     try testing.expectEqual(5, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
@@ -2111,6 +2133,54 @@ test "execCommand darwin: direct command" {
     try testing.expectEqualStrings(result[2], "testuser");
     try testing.expectEqualStrings(result[3], "foo");
     try testing.expectEqualStrings(result[4], "bar baz");
+}
+
+test "execCommand darwin: structured command bypasses login" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(alloc, .{ .direct = &.{
+        "/bin/sh",
+        "-c",
+        "exit 7",
+    } }, struct {
+        fn get(_: Allocator) !PasswdEntry {
+            return .{
+                .name = "testuser",
+            };
+        }
+    }, true);
+
+    try testing.expectEqual(3, result.len);
+    try testing.expectEqualStrings(result[0], "/bin/sh");
+    try testing.expectEqualStrings(result[1], "-c");
+    try testing.expectEqualStrings(result[2], "exit 7");
+}
+
+test "execCommand darwin: login bypass rejects shell command" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try testing.expectError(error.InvalidBypassMacosLoginCommand, execCommand(
+        alloc,
+        .{ .shell = "exit 7" },
+        struct {
+            fn get(_: Allocator) !PasswdEntry {
+                return .{
+                    .name = "testuser",
+                };
+            }
+        },
+        true,
+    ));
 }
 
 test "execCommand: shell command, empty passwd" {
@@ -2131,6 +2201,7 @@ test "execCommand: shell command, empty passwd" {
                 return .{};
             }
         },
+        false,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2157,6 +2228,7 @@ test "execCommand: shell command, error passwd" {
                 return error.Fail;
             }
         },
+        false,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2184,7 +2256,7 @@ test "execCommand: direct command, error passwd" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings(result[0], "foo");
@@ -2214,7 +2286,7 @@ test "execCommand: direct command, config freed" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, false);
 
     command_arena.deinit();
 
@@ -2235,7 +2307,7 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(1, result.len);
 
@@ -2257,7 +2329,7 @@ test "execCommand windows: bare non-cmd shell is passed through" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(1, result.len);
     try testing.expectEqualStrings("pwsh.exe", result[0]);
@@ -2275,7 +2347,7 @@ test "execCommand windows: shell with args is split on whitespace" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("wsl", result[0]);
@@ -2297,7 +2369,7 @@ test "execCommand windows: direct command is passed through unchanged" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);
