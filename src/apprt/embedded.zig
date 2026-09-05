@@ -1292,6 +1292,12 @@ pub const Surface = struct {
         return env;
     }
 
+    /// Structured argv is supplied by an embedding caller and must preserve
+    /// the direct child process identity, including its exit status.
+    pub fn bypassMacosLoginForStructuredCommand(self: *const Surface) bool {
+        return self.command_argv_mem != null;
+    }
+
     /// The cursor position from the host directly is in screen coordinates but
     /// all our interface works in pixels.
     fn cursorPosToPixels(self: *const Surface, pos: apprt.CursorPos) !apprt.CursorPos {
