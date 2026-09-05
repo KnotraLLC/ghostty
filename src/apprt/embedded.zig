@@ -2341,11 +2341,40 @@ pub const CAPI = struct {
         y: f64,
         scroll_mods: c_int,
     ) void {
-        surface.scrollCallback(
+        ghostty_surface_mouse_scroll_with_policy(
+            surface,
+            x,
+            y,
+            scroll_mods,
+            1,
+            1,
+            false,
+        );
+    }
+
+    export fn ghostty_surface_mouse_scroll_with_policy(
+        surface: *Surface,
+        x: f64,
+        y: f64,
+        scroll_mods: c_int,
+        multiplier: f64,
+        tui_multiplier: f64,
+        force_scrollback: bool,
+    ) void {
+        surface.core_surface.scrollCallbackWithPolicy(
             x,
             y,
             @bitCast(@as(u8, @truncate(@as(c_uint, @bitCast(scroll_mods))))),
-        );
+            .{
+                .multiplier = multiplier,
+                .tui_multiplier = tui_multiplier,
+                .force_scrollback = force_scrollback,
+            },
+        ) catch |err| {
+            // The ABI is intentionally void. Invalid external policy must
+            // fail closed without affecting the terminal or viewport.
+            log.warn("rejecting embedded scroll policy err={}", .{err});
+        };
     }
 
     export fn ghostty_surface_mouse_pressure(
