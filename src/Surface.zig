@@ -3457,6 +3457,92 @@ const ScrollAmount = struct {
     }
 };
 
+const ScrollRoute = enum {
+    viewport,
+    report,
+    alternate_arrows,
+};
+
+const ScrollMode = struct {
+    mouse_reporting: bool = false,
+    mouse_event_active: bool = false,
+    alternate_screen: bool = false,
+    alternate_scroll: bool = false,
+    force_scrollback: bool = false,
+};
+
+fn scrollRoute(mode: ScrollMode) ScrollRoute {
+    if (mode.force_scrollback) return .viewport;
+    if (mode.mouse_reporting) return .report;
+    if (mode.alternate_screen and !mode.mouse_event_active and mode.alternate_scroll) {
+        return .alternate_arrows;
+    }
+
+    return .viewport;
+}
+
+/// Extra policy supplied by an embedding host. The regular scroll callback
+/// uses the neutral policy so existing application runtimes retain their
+/// current behavior.
+pub const ScrollPolicy = struct {
+    multiplier: f64 = 1,
+    tui_multiplier: f64 = 1,
+    force_scrollback: bool = false,
+
+    const min_multiplier = 0.5;
+    const max_multiplier = 30.0;
+    const min_tui_multiplier = 1.0;
+    const max_tui_multiplier = 10.0;
+
+    fn scaleFor(self: ScrollPolicy, route: ScrollRoute) error{InvalidScrollPolicy}!f64 {
+        if (!std.math.isFinite(self.multiplier) or
+            !std.math.isFinite(self.tui_multiplier) or
+            self.multiplier < min_multiplier or
+            self.multiplier > max_multiplier or
+            self.tui_multiplier < min_tui_multiplier or
+            self.tui_multiplier > max_tui_multiplier)
+        {
+            return error.InvalidScrollPolicy;
+        }
+
+        const scale = switch (route) {
+            .viewport => self.multiplier,
+            .report, .alternate_arrows => self.multiplier * self.tui_multiplier,
+        };
+        if (scale < min_multiplier or scale > max_multiplier) {
+            return error.InvalidScrollPolicy;
+        }
+
+        return scale;
+    }
+};
+
+const max_scroll_steps: f64 = 4096;
+
+fn clampScrollOffset(offset: f64, cell_size: f64) f64 {
+    const limit = cell_size * max_scroll_steps;
+    return std.math.clamp(offset, -limit, limit);
+}
+
+const ScrollStep = struct {
+    delta: isize,
+    remainder: f64,
+};
+
+/// Convert a pixel offset to whole rows while retaining the portion that did
+/// not produce a row. Retaining the truncated delta (rather than the raw
+/// floating quotient) is what lets repeated half-speed discrete ticks make
+/// forward progress: 1.5 rows then 1.5 rows becomes 1 then 2.
+fn scrollStep(pending: f64, offset: f64, cell_size: f64) ScrollStep {
+    const total = pending + offset;
+    const delta: isize = @intFromFloat(@trunc(total / cell_size));
+    const used: f64 = @floatFromInt(delta);
+    return .{
+        .delta = delta,
+        .remainder = total - (used * cell_size),
+    };
+}
+
 /// Mouse scroll event. Negative is down, left. Positive is up, right.
 ///
 /// "Natural scrolling" is a macOS term for inverting the scroll direction.
@@ -3468,7 +3554,24 @@ pub fn scrollCallback(
     yoff: f64,
     scroll_mods: input.ScrollMods,
 ) !void {
+    return self.scrollCallbackWithPolicy(xoff, yoff, scroll_mods, .{});
+}
+
+pub fn scrollCallbackWithPolicy(
+    self: *Surface,
+    xoff: f64,
+    yoff: f64,
+    scroll_mods: input.ScrollMods,
+    policy: ScrollPolicy,
+) !void {
     // log.info("SCROLL: xoff={} yoff={} mods={}", .{ xoff, yoff, scroll_mods });
+
+    // C embeddings must not be able to turn invalid floating point values
+    // into unbounded report loops or integer conversions. Reject rather than
+    // attempting to recover an ambiguous scroll gesture.
+    if (!std.math.isFinite(xoff) or !std.math.isFinite(yoff)) {
+        return error.InvalidScrollPolicy;
+    }
 
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
@@ -3477,106 +3580,126 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
-    const y: ScrollAmount = if (yoff == 0) .{} else y: {
-        // We use cell_size to determine if we have accumulated enough to trigger a scroll
-        const cell_size: f64 = @floatFromInt(self.size.cell.height);
-
-        // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
-        // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
-        // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
-        // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
-        // that a wheel tick of 1 results in single scroll event.
-        const yoff_adjusted: f64 = if (scroll_mods.precision)
-            yoff * self.config.mouse_scroll_multiplier.precision
-        else yoff_adjusted: {
-            if (comptime builtin.target.os.tag.isDarwin()) {
-                // Round out the yoff to an absolute minimum of 1. macos tries to
-                // simulate precision scrolling with non precision events by
-                // ramping up the magnitude of the offsets as it detects faster
-                // scrolling. Single click (very slow) scrolls are reported with a
-                // magnitude of 0.1 which would normally require a few clicks
-                // before we register an actual scroll event (depending on cell
-                // height and the mouse_scroll_multiplier setting).
-                const yoff_max: f64 = if (yoff > 0)
-                    @max(yoff, 1)
-                else
-                    @min(yoff, -1);
-
-                break :yoff_adjusted yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            } else {
-                break :yoff_adjusted yoff * cell_size * self.config.mouse_scroll_multiplier.discrete;
-            }
-        };
-
-        // Add our previously saved pending amount to the offset to get the
-        // new offset value. The signs of the pending and yoff should match
-        // so that we move further away from zero, but we don't assert
-        // this because in theory a user could scroll in the opposite
-        // direction and undo a pending scroll.
-        const poff: f64 = self.mouse.pending_scroll_y + yoff_adjusted;
-
-        // If the new offset is less than a single unit of scroll, we save
-        // the new pending value and do not scroll yet.
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_y = poff;
-            break :y .{};
-        }
-
-        // We scroll by the number of rows in the offset and save the remainder
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
-
-        // Round towards zero.
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-
-        break :y .{ .delta = delta };
-    };
-
-    // For detailed comments see the y calculation above.
-    const x: ScrollAmount = if (xoff == 0) .{} else x: {
-        if (!scroll_mods.precision) {
-            const x_delta_isize: isize = @intFromFloat(@round(xoff));
-            break :x .{ .delta = x_delta_isize };
-        }
-
-        const poff: f64 = self.mouse.pending_scroll_x + xoff;
-        const cell_size: f64 = @floatFromInt(self.size.cell.width);
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_x = poff;
-            break :x .{};
-        }
-
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_x = poff - (amount * cell_size);
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-        break :x .{ .delta = delta };
-    };
-
-    // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
-
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
+        // Snapshot the native terminal modes while holding the same lock that
+        // guards pending fractional scroll state and routing below.
+        const route = scrollRoute(.{
+            .mouse_reporting = self.isMouseReporting(),
+            .mouse_event_active = self.io.terminal.flags.mouse_event != .none,
+            .alternate_screen = self.io.terminal.screens.active_key == .alternate,
+            .alternate_scroll = self.io.terminal.modes.get(.mouse_alternate_scroll),
+            .force_scrollback = policy.force_scrollback,
+        });
+        const scale = try policy.scaleFor(route);
+
+        const y: ScrollAmount = if (yoff == 0) .{} else y: {
+            // We use cell_size to determine if we have accumulated enough to trigger a scroll
+            const cell_size: f64 = @floatFromInt(self.size.cell.height);
+
+            // If we have precision scroll, yoff is the number of pixels to scroll. In non-precision
+            // scroll, yoff is the number of wheel ticks. Some mice are capable of reporting fractional
+            // wheel ticks, which don't necessarily get reported as precision scrolls. We normalize all
+            // scroll events to pixels by multiplying the wheel tick value and the cell size. This means
+            // that a wheel tick of 1 results in single scroll event.
+            const yoff_adjusted: f64 = if (scroll_mods.precision)
+                clampScrollOffset(
+                    yoff * self.config.mouse_scroll_multiplier.precision * scale,
+                    cell_size,
+                )
+            else yoff_adjusted: {
+                if (comptime builtin.target.os.tag.isDarwin()) {
+                    // Round out the yoff to an absolute minimum of 1. macos tries to
+                    // simulate precision scrolling with non precision events by
+                    // ramping up the magnitude of the offsets as it detects faster
+                    // scrolling. Single click (very slow) scrolls are reported with a
+                    // magnitude of 0.1 which would normally require a few clicks
+                    // before we register an actual scroll event (depending on cell
+                    // height and the mouse_scroll_multiplier setting).
+                    const yoff_max: f64 = if (yoff > 0)
+                        @max(yoff, 1)
+                    else
+                        @min(yoff, -1);
+
+                    // Apply the embedding policy after macOS's minimum discrete
+                    // tick normalization, before pending fractional accumulation.
+                    break :yoff_adjusted clampScrollOffset(
+                        yoff_max * cell_size * self.config.mouse_scroll_multiplier.discrete * scale,
+                        cell_size,
+                    );
+                } else {
+                    break :yoff_adjusted clampScrollOffset(
+                        yoff * cell_size * self.config.mouse_scroll_multiplier.discrete * scale,
+                        cell_size,
+                    );
+                }
+            };
+
+            // Add our previously saved pending amount to the offset to get the
+            // new offset value. The signs of the pending and yoff should match
+            // so that we move further away from zero, but we don't assert
+            // this because in theory a user could scroll in the opposite
+            // direction and undo a pending scroll.
+            const step = scrollStep(self.mouse.pending_scroll_y, yoff_adjusted, cell_size);
+
+            // If the new offset is less than a single unit of scroll, we save
+            // the new pending value and do not scroll yet.
+            if (step.delta == 0) {
+                self.mouse.pending_scroll_y = step.remainder;
+                break :y .{};
+            }
+
+            // We scroll by the number of rows in the offset and save the remainder
+            self.mouse.pending_scroll_y = step.remainder;
+            assert(@abs(step.delta) >= 1);
+
+            break :y .{ .delta = step.delta };
+        };
+
+        // For detailed comments see the y calculation above.
+        const x: ScrollAmount = if (xoff == 0) .{} else x: {
+            if (!scroll_mods.precision) {
+                const cell_size: f64 = @floatFromInt(self.size.cell.width);
+                const step = scrollStep(
+                    self.mouse.pending_scroll_x,
+                    clampScrollOffset(xoff * cell_size * scale, cell_size),
+                    cell_size,
+                );
+                self.mouse.pending_scroll_x = step.remainder;
+                break :x .{ .delta = step.delta };
+            }
+
+            const cell_size: f64 = @floatFromInt(self.size.cell.width);
+            const step = scrollStep(
+                self.mouse.pending_scroll_x,
+                clampScrollOffset(xoff * scale, cell_size),
+                cell_size,
+            );
+            if (step.delta == 0) {
+                self.mouse.pending_scroll_x = step.remainder;
+                break :x .{};
+            }
+
+            self.mouse.pending_scroll_x = step.remainder;
+            assert(@abs(step.delta) >= 1);
+            break :x .{ .delta = step.delta };
+        };
+
+        // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
+
         // If we have an active mouse reporting mode, clear the selection.
         // The selection can occur if the user uses the shift mod key to
         // override mouse grabbing from the window.
-        if (self.isMouseReporting()) {
+        if (route != .viewport) {
             try self.setSelection(null);
         }
 
         // If we're in alternate screen with alternate scroll enabled, then
-        // we convert to cursor keys. This only happens if we're:
-        // (1) alt screen (2) no explicit mouse reporting and (3) alt
-        // scroll mode enabled.
-        if (self.io.terminal.screens.active_key == .alternate and
-            self.io.terminal.flags.mouse_event == .none and
-            self.io.terminal.modes.get(.mouse_alternate_scroll))
-        {
+        // we convert to cursor keys. A forced scrollback gesture deliberately
+        // bypasses this route; it never changes the active terminal screen.
+        if (route == .alternate_arrows) {
             if (y.delta != 0) {
                 // When we send mouse events as cursor keys we always
                 // clear the selection.
@@ -3608,7 +3731,7 @@ pub fn scrollCallback(
         // the normal logic.
 
         // If we're scrolling up or down, then send a mouse event.
-        if (self.isMouseReporting()) {
+        if (route == .report) {
             for (0..@abs(y.delta)) |_| {
                 const pos = try self.rt_surface.getCursorPos();
                 self.mouseReport(switch (y.direction()) {
@@ -6553,4 +6676,74 @@ test "queueIo frees allocated writes in readonly mode" {
         .alloc = testing.allocator,
         .data = data,
     } }, .unlocked);
+}
+
+test "scroll policy routes reporting, alternate arrows, and forced scrollback" {
+    const testing = std.testing;
+
+    try testing.expectEqual(
+        ScrollRoute.report,
+        scrollRoute(.{ .mouse_reporting = true }),
+    );
+    try testing.expectEqual(
+        ScrollRoute.alternate_arrows,
+        scrollRoute(.{
+            .alternate_screen = true,
+            .alternate_scroll = true,
+        }),
+    );
+    try testing.expectEqual(
+        ScrollRoute.viewport,
+        scrollRoute(.{
+            .mouse_reporting = true,
+            .force_scrollback = true,
+        }),
+    );
+    try testing.expectEqual(
+        ScrollRoute.viewport,
+        scrollRoute(.{
+            .alternate_screen = true,
+            .alternate_scroll = true,
+            .force_scrollback = true,
+        }),
+    );
+}
+
+test "scroll policy applies multipliers independently" {
+    const testing = std.testing;
+
+    try testing.expectApproxEqAbs(
+        @as(f64, 0.5),
+        try (ScrollPolicy{ .multiplier = 0.5 }).scaleFor(.viewport),
+        0.000_001,
+    );
+    try testing.expectApproxEqAbs(
+        @as(f64, 1.5),
+        try (ScrollPolicy{ .multiplier = 0.5, .tui_multiplier = 3 }).scaleFor(.report),
+        0.000_001,
+    );
+    try testing.expectError(
+        error.InvalidScrollPolicy,
+        (ScrollPolicy{ .multiplier = 100, .tui_multiplier = 10 }).scaleFor(.report),
+    );
+}
+
+test "scroll policy retains half discrete ticks for fractional accumulation" {
+    const testing = std.testing;
+
+    const cell_height: f64 = 20;
+    const normalized_tick: f64 = 1 * cell_height * 3;
+    const scaled = normalized_tick * (try (ScrollPolicy{ .multiplier = 0.5 }).scaleFor(.viewport));
+    const first = scrollStep(0, scaled, cell_height);
+    try testing.expectEqual(@as(isize, 1), first.delta);
+    try testing.expectApproxEqAbs(@as(f64, 10), first.remainder, 0.000_001);
+
+    const second = scrollStep(first.remainder, scaled, cell_height);
+    try testing.expectEqual(@as(isize, 2), second.delta);
+    try testing.expectApproxEqAbs(@as(f64, 0), second.remainder, 0.000_001);
+
+    const horizontal_first = scrollStep(0, cell_height * 0.5, cell_height);
+    try testing.expectEqual(@as(isize, 0), horizontal_first.delta);
+    const horizontal_second = scrollStep(horizontal_first.remainder, cell_height * 0.5, cell_height);
+    try testing.expectEqual(@as(isize, 1), horizontal_second.delta);
 }

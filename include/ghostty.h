@@ -1262,6 +1262,21 @@ GHOSTTY_API void ghostty_surface_mouse_scroll(ghostty_surface_t,
                                                  double,
                                                  double,
                                                  ghostty_input_scroll_mods_t);
+// Applies embedder-owned scroll policy without changing terminal mode
+// semantics. `multiplier` must be finite and within 0.5..30 (including its
+// product with `tui_multiplier`); `tui_multiplier` must be finite and within
+// 1..10. `multiplier` scales every route; `tui_multiplier` additionally
+// scales mouse reporting and alternate-screen arrow scrolling. Setting
+// `force_scrollback` bypasses those TUI routes and scrolls the viewport
+// without switching screens. Invalid values fail closed. Each accepted input
+// is bounded to 4096 scroll steps to prevent report floods.
+GHOSTTY_API void ghostty_surface_mouse_scroll_with_policy(ghostty_surface_t,
+                                                             double,
+                                                             double,
+                                                             ghostty_input_scroll_mods_t,
+                                                             double multiplier,
+                                                             double tui_multiplier,
+                                                             bool force_scrollback);
 GHOSTTY_API void ghostty_surface_mouse_pressure(ghostty_surface_t, uint32_t, double);
 GHOSTTY_API void ghostty_surface_ime_point(ghostty_surface_t, double*, double*, double*, double*);
 GHOSTTY_API void ghostty_surface_request_close(ghostty_surface_t);
