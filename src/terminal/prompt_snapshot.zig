@@ -194,6 +194,52 @@ test "snapshot rejects invalid mode without writing output" {
     try std.testing.expectEqualSlices(u8, &[_]u8{0xaa} ** 8, &output);
 }
 
+test "snapshot rejects excessive cell work before writing output" {
+    var screen = try Screen.init(std.testing.io, std.testing.allocator, .{
+        .cols = 257,
+        .rows = 256,
+        .max_scrollback_bytes = 0,
+    });
+    defer screen.deinit();
+
+    var output = [_]u8{0xaa} ** 8;
+    try std.testing.expectError(error.TooManyCells, read(&screen, 1, &output));
+    try std.testing.expectEqualSlices(u8, &[_]u8{0xaa} ** 8, &output);
+}
+
+test "snapshot observes the terminal cap for one long combining sequence" {
+    const suffixes = @import("page.zig").grapheme_max_len + 16;
+    const alloc = std.testing.allocator;
+
+    var screen = try Screen.init(std.testing.io, alloc, .{
+        .cols = 2,
+        .rows = 1,
+        .max_scrollback_bytes = 0,
+    });
+    defer screen.deinit();
+
+    const input = try alloc.alloc(u8, 1 + 2 * suffixes);
+    defer alloc.free(input);
+    input[0] = 'e';
+    for (0..suffixes) |index| {
+        @memcpy(input[1 + 2 * index ..][0..2], "\u{301}");
+    }
+    try screen.testWriteString(input);
+
+    var output: [256]u8 = undefined;
+    const result = try read(&screen, 1, &output);
+    try std.testing.expectEqual(1 + 2 * @import("page.zig").grapheme_max_len + 1, result.text.len);
+    try std.testing.expectEqual(@as(u8, 'e'), result.text[0]);
+    for (0..@import("page.zig").grapheme_max_len) |index| {
+        try std.testing.expectEqualSlices(
+            u8,
+            "\u{301}",
+            result.text[1 + 2 * index ..][0..2],
+        );
+    }
+    try std.testing.expectEqual(@as(u8, '\n'), result.text[result.text.len - 1]);
+}
+
 test "snapshot rejects multibyte combining output beyond the fixed cap" {
     const alloc = std.testing.allocator;
     const repetitions = 32_768;
