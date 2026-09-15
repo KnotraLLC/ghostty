@@ -560,6 +560,15 @@ typedef struct {
   // reorder above fields.
   const char* const* command_argv;
   size_t command_argc;
+  // Initial surface size in pixels (backing-store units, the same units
+  // ghostty_surface_set_size takes). When both are non-zero the surface —
+  // and therefore the child pty — is created at this size instead of the
+  // embedded default (800x600), so the first winsize the child observes is
+  // the real one. Applying the size only after ghostty_surface_new lets the
+  // shell draw its first prompt at the default width and then reflow it,
+  // which leaves a stale prompt row behind. Appended; never reorder above.
+  uint32_t initial_width_px;
+  uint32_t initial_height_px;
 } ghostty_surface_config_s;
 
 typedef struct {

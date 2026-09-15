@@ -538,7 +538,34 @@ pub const Surface = struct {
         /// empty argv[0] are rejected with error.InvalidCommandArgv.
         command_argv: ?[*]?[*:0]const u8 = null,
         command_argc: usize = 0,
+
+        /// Initial surface size in pixels. When both are non-zero the
+        /// surface and its child pty are created at this size instead of
+        /// the 800x600 default, so the child's first winsize is the real
+        /// one and no post-creation resize is needed for the first prompt.
+        initial_width_px: u32 = 0,
+        initial_height_px: u32 = 0,
     };
+
+    /// The size a surface is created at: the embedder's initial size when
+    /// it gave one, otherwise the historical 800x600 default.
+    fn initialSize(opts: Options) apprt.SurfaceSize {
+        if (opts.initial_width_px > 0 and opts.initial_height_px > 0) {
+            return .{ .width = opts.initial_width_px, .height = opts.initial_height_px };
+        }
+        return .{ .width = 800, .height = 600 };
+    }
+
+    test "initialSize honors a non-zero embedder size and falls back otherwise" {
+        const testing = std.testing;
+        const given: Options = .{ .initial_width_px = 1460, .initial_height_px = 312 };
+        try testing.expectEqual(@as(u32, 1460), initialSize(given).width);
+        try testing.expectEqual(@as(u32, 312), initialSize(given).height);
+        const half: Options = .{ .initial_width_px = 1460 };
+        try testing.expectEqual(@as(u32, 800), initialSize(half).width);
+        try testing.expectEqual(@as(u32, 600), initialSize(half).height);
+        try testing.expectEqual(@as(u32, 800), initialSize(.{}).width);
+    }
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
         self.* = .{
@@ -550,7 +577,7 @@ pub const Surface = struct {
                 .x = @floatCast(opts.scale_factor),
                 .y = @floatCast(opts.scale_factor),
             },
-            .size = .{ .width = 800, .height = 600 },
+            .size = initialSize(opts),
             .cursor_pos = .{ .x = -1, .y = -1 },
         };
 
