@@ -1704,6 +1704,25 @@ pub const CAPI = struct {
         }
     };
 
+    // ghostty_mobile_snapshot_s
+    const MobileSnapshot = extern struct {
+        data: ?[*]const u8 = null,
+        data_len: usize = 0,
+
+        fn deinit(self: *MobileSnapshot) void {
+            if (self.data) |ptr| global.alloc().free(ptr[0..self.data_len]);
+            self.* = .{};
+        }
+    };
+
+    // ghostty_mobile_snapshot_result_e
+    const MobileSnapshotResult = enum(c_int) {
+        ok = 0,
+        too_large = 1,
+        too_many_styles = 2,
+        unsupported_visual_state = 3,
+    };
+
     // ghostty_point_s
     const Point = extern struct {
         tag: Tag,
@@ -2120,6 +2139,48 @@ pub const CAPI = struct {
     export fn ghostty_surface_free_prompt_snapshot(
         _: *Surface,
         result: *PromptSnapshot,
+    ) void {
+        result.deinit();
+    }
+
+    /// Read a complete, bounded DMS1 snapshot of the active terminal screen.
+    /// The copy and its terminal metadata are captured while the renderer
+    /// state mutex is held; callers own the result until the matching free.
+    export fn ghostty_surface_read_mobile_snapshot(
+        surface: *Surface,
+        result: *MobileSnapshot,
+    ) MobileSnapshotResult {
+        result.* = .{};
+
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.lockDemand(global.io());
+        defer core_surface.renderer_state.unlockDemand(global.io());
+
+        const term = core_surface.renderer_state.terminal;
+        var output: [terminal.mobile_snapshot.max_bytes]u8 = undefined;
+        const payload = terminal.mobile_snapshot.read(term.screens.active, .{
+            .palette = &term.colors.palette.current,
+            .foreground = term.colors.foreground.get(),
+            .background = term.colors.background.get(),
+            .bold_color = core_surface.config.bold_color,
+            .active_alternate = term.screens.active_key == .alternate,
+            .application_cursor = term.modes.get(.cursor_keys),
+            .bracketed_paste = term.modes.get(.bracketed_paste),
+            .cursor_visible = term.modes.get(.cursor_visible),
+            .cursor_shape = term.screens.active.cursor.cursor_style,
+        }, &output) catch |err| return switch (err) {
+            error.TooLarge => .too_large,
+            error.TooManyStyles => .too_many_styles,
+            error.UnsupportedVisualState => .unsupported_visual_state,
+        };
+        const data = global.alloc().dupe(u8, payload) catch return .too_large;
+        result.* = .{ .data = data.ptr, .data_len = data.len };
+        return .ok;
+    }
+
+    export fn ghostty_surface_free_mobile_snapshot(
+        _: *Surface,
+        result: *MobileSnapshot,
     ) void {
         result.deinit();
     }

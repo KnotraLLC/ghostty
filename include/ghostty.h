@@ -470,6 +470,21 @@ typedef struct {
   uintptr_t text_len;
 } ghostty_prompt_snapshot_s;
 
+// A complete, versioned DMS1 snapshot of the active terminal screen. The
+// bytes are little-endian and must be released with
+// ghostty_surface_free_mobile_snapshot exactly once after a successful read.
+typedef struct {
+  const uint8_t* data;
+  uintptr_t data_len;
+} ghostty_mobile_snapshot_s;
+
+typedef enum {
+  GHOSTTY_MOBILE_SNAPSHOT_OK = 0,
+  GHOSTTY_MOBILE_SNAPSHOT_TOO_LARGE = 1,
+  GHOSTTY_MOBILE_SNAPSHOT_TOO_MANY_STYLES = 2,
+  GHOSTTY_MOBILE_SNAPSHOT_UNSUPPORTED_VISUAL_STATE = 3,
+} ghostty_mobile_snapshot_result_e;
+
 typedef enum {
   GHOSTTY_POINT_ACTIVE,
   GHOSTTY_POINT_VIEWPORT,
@@ -1318,6 +1333,14 @@ GHOSTTY_API bool ghostty_surface_read_prompt_snapshot(ghostty_surface_t,
 // Frees a successful prompt snapshot and zeroes `result`.
 GHOSTTY_API void ghostty_surface_free_prompt_snapshot(ghostty_surface_t,
                                                         ghostty_prompt_snapshot_s*);
+
+// Reads only the active screen. The output is never partial: on a non-OK
+// result, `out` is reset and owns no allocation.
+GHOSTTY_API ghostty_mobile_snapshot_result_e
+ghostty_surface_read_mobile_snapshot(ghostty_surface_t,
+                                     ghostty_mobile_snapshot_s* out);
+GHOSTTY_API void ghostty_surface_free_mobile_snapshot(ghostty_surface_t,
+                                                        ghostty_mobile_snapshot_s*);
 
 #ifdef __APPLE__
 GHOSTTY_API void ghostty_surface_set_display_id(ghostty_surface_t, uint32_t);

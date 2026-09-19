@@ -342,6 +342,7 @@ const DerivedConfig = struct {
     notify_on_command_finish_action: configpkg.Config.NotifyOnCommandFinishAction,
     notify_on_command_finish_after: Duration,
     key_remaps: input.KeyRemapSet,
+    bold_color: ?terminal.Style.BoldColor,
 
     const Link = struct {
         regex: oni.Regex,
@@ -422,6 +423,7 @@ const DerivedConfig = struct {
             .notify_on_command_finish_action = config.@"notify-on-command-finish-action",
             .notify_on_command_finish_after = config.@"notify-on-command-finish-after",
             .key_remaps = try config.@"key-remap".clone(alloc),
+            .bold_color = if (config.@"bold-color") |value| value.toTerminal() else null,
 
             // Assignments happen sequentially so we have to do this last
             // so that the memory is captured from allocs above.
