@@ -96,7 +96,10 @@ pub fn read(
             const text_len = try encodeGrapheme(pin, cell, &text);
             const width: u8 = switch (cell.wide) {
                 .wide => 2,
-                .spacer_head => return error.UnsupportedVisualState,
+                // The final column of a soft-wrapped wide grapheme is a
+                // visible blank cell. Its glyph is owned by the next row's
+                // wide cell, so serialize only this styled blank here.
+                .spacer_head => 1,
                 .narrow => 1,
                 .spacer_tail => unreachable,
             };
@@ -306,6 +309,47 @@ test "DMS1 cursor mapping is independent of Ghostty enum order" {
     try std.testing.expectEqual(@as(u8, 0), cursorShape(.block_hollow));
     try std.testing.expectEqual(@as(u8, 1), cursorShape(.bar));
     try std.testing.expectEqual(@as(u8, 2), cursorShape(.underline));
+}
+
+test "DMS1 preserves a wide glyph split across a row boundary" {
+    var screen = try Screen.init(std.testing.io, std.testing.allocator, .{
+        .cols = 3,
+        .rows = 2,
+        .max_scrollback_bytes = 0,
+    });
+    defer screen.deinit();
+    try screen.testWriteString("ab界");
+
+    var output: [max_bytes]u8 = undefined;
+    const result = try read(&screen, testOptions(), &output);
+    const style_count = result[17];
+    var offset: usize = header_len + @as(usize, style_count) * style_len;
+    const run_count = std.mem.readInt(u32, result[18..][0..4], .little);
+    var saw_head = false;
+    var saw_wide = false;
+    for (0..run_count) |_| {
+        const row = std.mem.readInt(u16, result[offset..][0..2], .little);
+        const column = std.mem.readInt(u16, result[offset + 2 ..][0..2], .little);
+        const repeat = std.mem.readInt(u16, result[offset + 4 ..][0..2], .little);
+        const width = result[offset + 6];
+        const text_len = std.mem.readInt(u16, result[offset + 8 ..][0..2], .little);
+        const text = result[offset + run_len ..][0..text_len];
+        if (row == 0 and column == 2) {
+            try std.testing.expectEqual(@as(u16, 1), repeat);
+            try std.testing.expectEqual(@as(u8, 1), width);
+            try std.testing.expectEqual(@as(usize, 0), text.len);
+            saw_head = true;
+        }
+        if (row == 1 and column == 0) {
+            try std.testing.expectEqual(@as(u16, 1), repeat);
+            try std.testing.expectEqual(@as(u8, 2), width);
+            try std.testing.expectEqualStrings("界", text);
+            saw_wide = true;
+        }
+        offset += run_len + text_len;
+    }
+    try std.testing.expect(saw_head);
+    try std.testing.expect(saw_wide);
 }
 
 test "DMS1 rejects more than 64 resolved styles" {
