@@ -138,13 +138,20 @@ pub const Message = union(enum) {
 
     /// A command has started in the shell, start a timer. Carries the
     /// decoded OSC 133 cmdline metadata, truncated to 511 bytes plus
-    /// NUL, or all zeros when the sequence carried none.
-    start_command: [511:0]u8,
+    /// NUL, or all zeros when the sequence carried none. `at` is when the
+    /// sequence was parsed, so delivery delay does not skew the timer.
+    start_command: struct {
+        cmdline: [511:0]u8,
+        at: std.Io.Timestamp,
+    },
 
     /// A command has finished in the shell, stop the timer and send out
-    /// notifications as appropriate. The optional u8 is the exit code
-    /// of the command.
-    stop_command: ?u8,
+    /// notifications as appropriate. `code` is the command's exit code;
+    /// `at` is when the sequence was parsed.
+    stop_command: struct {
+        code: ?u8,
+        at: std.Io.Timestamp,
+    },
 
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,

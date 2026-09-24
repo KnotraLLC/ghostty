@@ -136,6 +136,18 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
+        self.queueSurfaceMessage(msg);
+    }
+
+    /// Send a surface message in order with anything already parked.
+    /// Caller holds the renderer state mutex (it may be released and
+    /// reacquired while applying backpressure). Used by the parse thread
+    /// and, via ThreadData.sendSurfaceMessage, by the termio thread so a
+    /// child exit cannot overtake parked shell-integration events.
+    pub fn queueSurfaceMessage(
+        self: *StreamHandler,
+        msg: apprt.surface.Message,
+    ) void {
         // Never wait on the app mailbox with the renderer state locked:
         // park the message (in order) and keep draining the pty. See
         // SurfaceBacklog. Anything already parked goes first.
@@ -1467,7 +1479,10 @@ pub const StreamHandler = struct {
                 var writer = std.Io.Writer.fixed(cmdline[0..511]);
                 cmd.writeCommandLine(&writer) catch {};
                 cmdline[writer.end] = 0;
-                self.surfaceMessageWriter(.{ .start_command = cmdline });
+                self.surfaceMessageWriter(.{ .start_command = .{
+                    .cmdline = cmdline,
+                    .at = .now(global.io(), .awake),
+                } });
             },
 
             .end_command => {
@@ -1479,7 +1494,10 @@ pub const StreamHandler = struct {
                     break :code std.math.cast(u8, raw) orelse 1;
                 };
 
-                self.surfaceMessageWriter(.{ .stop_command = code });
+                self.surfaceMessageWriter(.{ .stop_command = .{
+                    .code = code,
+                    .at = .now(global.io(), .awake),
+                } });
             },
 
             // Handled by Terminal, no special handling by us

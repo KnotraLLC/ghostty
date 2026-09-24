@@ -164,7 +164,14 @@ pub fn tick(self: *App, rt_app: *apprt.App) !void {
 }
 
 fn flushSurfaceBacklogs(self: *App) void {
-    for (self.surfaces.items) |surface| surface.core().flushSurfaceBacklog();
+    for (self.surfaces.items) |surface| {
+        // The embedded apprt lists a surface before its core surface is
+        // initialized; never read that memory.
+        if (comptime @hasField(apprt.Surface, "core_ready")) {
+            if (!surface.core_ready) continue;
+        }
+        surface.core().flushSurfaceBacklog();
+    }
 }
 
 /// Update the configuration associated with the app. This can only be

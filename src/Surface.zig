@@ -1141,18 +1141,18 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         },
 
         .start_command => |v| {
-            self.command_timer = .now(global.io(), .awake);
+            self.command_timer = v.at;
             _ = self.rt_app.performAction(
                 .{ .surface = self },
                 .command_started,
-                .{ .cmdline = std.mem.sliceTo(&v, 0) },
+                .{ .cmdline = std.mem.sliceTo(&v.cmdline, 0) },
             ) catch |err| {
                 log.warn("apprt failed to notify command start={}", .{err});
             };
         },
 
         .stop_command => |v| timer: {
-            const end: std.Io.Timestamp = .now(global.io(), .awake);
+            const end: std.Io.Timestamp = v.at;
             const start = self.command_timer orelse break :timer;
             self.command_timer = null;
             const duration_raw = start.durationTo(end).nanoseconds;
@@ -1170,7 +1170,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
                 .{ .surface = self },
                 .command_finished,
                 .{
-                    .exit_code = v,
+                    .exit_code = v.code,
                     .duration = duration,
                 },
             ) catch |err| {
