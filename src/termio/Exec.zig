@@ -1522,7 +1522,7 @@ pub const ReadThread = struct {
                 pipeline.mutex.lockUncancelable(global.io());
                 pipeline.tail = (pipeline.tail + 1) % buffer_count;
                 pipeline.count -= 1;
-                io.io_health.pending_batches.store(pipeline.count, .monotonic);
+                io.io_health.pending_batches.store(@intCast(pipeline.count), .monotonic);
                 const wake = pipeline.count == 0 and
                     pipeline.bridging and
                     pipeline.idle_write_fd >= 0;
@@ -1734,7 +1734,7 @@ pub const ReadThread = struct {
                 pipeline.lens[pipeline.head] = total;
                 pipeline.head = (pipeline.head + 1) % buffer_count;
                 pipeline.count += 1;
-                health.pending_batches.store(pipeline.count, .monotonic);
+                health.pending_batches.store(@intCast(pipeline.count), .monotonic);
                 pipeline.mutex.unlock(global.io());
                 pipeline.batch_ready.signal(global.io());
             }
