@@ -34,6 +34,11 @@ const Message = apprt.surface.Message;
 /// ponytail: fixed cap; make it configurable only if a real workload hits it.
 pub const soft_limit = 1024;
 
+/// Most messages one flush delivers. The app mailbox holds 64; leaving
+/// room means a backlog never takes every slot from other producers (the
+/// renderer's health report, other surfaces, a teardown in progress).
+pub const max_per_flush = 32;
+
 queue: std.ArrayListUnmanaged(Message) = .empty,
 
 /// Set while anything is parked, so the app thread can skip the renderer
@@ -79,13 +84,14 @@ pub fn park(self: *SurfaceBacklog, alloc: Allocator, msg: Message) bool {
     return true;
 }
 
-/// Deliver parked messages, in order, as long as `sink` accepts them
-/// without blocking. `sink` is anything with `push(Message, Timeout)`
+/// Deliver up to `max_per_flush` parked messages, in order, as long as
+/// `sink` accepts them without blocking. `sink` is anything with `push(Message, Timeout)`
 /// returning the new length (0 when full): the surface mailbox, or a fake
 /// in tests. Returns true when the backlog is empty.
 pub fn flush(self: *SurfaceBacklog, sink: anytype) bool {
     var sent: usize = 0;
-    while (sent < self.queue.items.len) : (sent += 1) {
+    const limit = @min(self.queue.items.len, max_per_flush);
+    while (sent < limit) : (sent += 1) {
         if (sink.push(self.queue.items[sent], .{ .instant = {} }) == 0) break;
     }
     if (sent > 0) self.queue.replaceRangeAssumeCapacity(0, sent, &.{});
@@ -159,6 +165,10 @@ const FakeSink = struct {
     }
 };
 
+fn stop(code: u8) Message {
+    return .{ .stop_command = .{ .code = code, .at = .zero } };
+}
+
 fn titleMsg(c: u8) Message {
     var buf: [256]u8 = @splat(0);
     buf[0] = c;
@@ -220,8 +230,8 @@ test "partial flush resumes in order" {
     var b: SurfaceBacklog = .{};
     defer b.deinit(alloc);
 
-    try testing.expect(b.park(alloc, .{ .stop_command = 0 }));
-    try testing.expect(b.park(alloc, .{ .stop_command = 1 }));
+    try testing.expect(b.park(alloc, stop(0)));
+    try testing.expect(b.park(alloc, stop(1)));
     try testing.expect(b.park(alloc, titleMsg('x')));
 
     var full: FakeSink = .{ .room = 1 };
@@ -232,8 +242,8 @@ test "partial flush resumes in order" {
     var rest: FakeSink = .{ .room = 10 };
     defer rest.deinit();
     try testing.expect(b.flush(&rest));
-    try testing.expectEqual(@as(?u8, 0), full.got.items[0].stop_command);
-    try testing.expectEqual(@as(?u8, 1), rest.got.items[0].stop_command);
+    try testing.expectEqual(@as(?u8, 0), full.got.items[0].stop_command.code);
+    try testing.expectEqual(@as(?u8, 1), rest.got.items[0].stop_command.code);
     try testing.expectEqual(Tag.set_title, @as(Tag, rest.got.items[1]));
 }
 
@@ -261,8 +271,43 @@ test "soft limit reports backpressure" {
     var b: SurfaceBacklog = .{};
     defer b.deinit(alloc);
 
-    for (0..soft_limit) |_| try testing.expect(b.park(alloc, .{ .stop_command = 0 }));
+    for (0..soft_limit) |_| try testing.expect(b.park(alloc, stop(0)));
     try testing.expect(!b.overLimit());
-    try testing.expect(b.park(alloc, .{ .stop_command = 0 }));
+    try testing.expect(b.park(alloc, stop(0)));
     try testing.expect(b.overLimit());
+}
+
+test "one flush leaves mailbox room for other producers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var b: SurfaceBacklog = .{};
+    defer b.deinit(alloc);
+
+    for (0..100) |i| try testing.expect(b.park(alloc, stop(@intCast(i))));
+    var sink: FakeSink = .{ .room = 64 };
+    defer sink.deinit();
+    try testing.expect(!b.flush(&sink));
+    try testing.expectEqual(@as(usize, max_per_flush), sink.got.items.len);
+    try testing.expectEqual(@as(usize, 100 - max_per_flush), b.queue.items.len);
+    // Order resumes where it stopped.
+    try testing.expectEqual(@as(?u8, max_per_flush), b.queue.items[0].stop_command.code);
+}
+
+test "termio-thread events are ordered barriers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var b: SurfaceBacklog = .{};
+    defer b.deinit(alloc);
+
+    try testing.expect(b.park(alloc, titleMsg('a')));
+    try testing.expect(b.park(alloc, stop(0)));
+    try testing.expect(b.park(alloc, .{ .child_exited = .{ .exit_code = 0, .runtime_ms = 1 } }));
+    try testing.expect(b.park(alloc, .{ .password_input = true }));
+
+    var sink: FakeSink = .{ .room = 10 };
+    defer sink.deinit();
+    try testing.expect(b.flush(&sink));
+    const got = try sink.tags();
+    defer alloc.free(got);
+    try testing.expectEqualSlices(Tag, &.{ .set_title, .stop_command, .child_exited, .password_input }, got);
 }

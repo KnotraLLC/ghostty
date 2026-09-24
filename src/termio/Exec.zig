@@ -286,12 +286,12 @@ fn processExitCommon(td: *termio.Termio.ThreadData, exit_code: u32) void {
 
     // We always notify the surface immediately that the child has
     // exited and some metadata about the exit.
-    _ = td.surface_mailbox.push(.{
+    td.sendSurfaceMessage(.{
         .child_exited = .{
             .exit_code = exit_code,
             .runtime_ms = runtime_ms,
         },
-    }, .{ .forever = {} });
+    });
 }
 
 fn processExit(
@@ -379,11 +379,10 @@ fn termiosTimer(
         }
 
         // We have to notify the surface that we're in password input.
-        // We must block on this because the balanced true/false state
-        // of this is critical to apprt behavior.
-        _ = td.surface_mailbox.push(.{
-            .password_input = password_input,
-        }, .{ .forever = {} });
+        // The balanced true/false state is critical to apprt behavior, so
+        // this is never dropped: it is delivered in order, parked if the
+        // mailbox is full.
+        td.sendSurfaceMessage(.{ .password_input = password_input });
     }
 
     // Repeat the timer

@@ -473,6 +473,10 @@ pub const Surface = struct {
     platform: Platform,
     userdata: ?*anyopaque = null,
     core_surface: CoreSurface,
+    /// Set once core_surface is initialized. The app lists this surface
+    /// before then (see init), so app-thread work over all surfaces must
+    /// check it before touching core_surface.
+    core_ready: bool = false,
     content_scale: apprt.ContentScale,
     size: apprt.SurfaceSize,
     cursor_pos: apprt.CursorPos,
@@ -704,6 +708,8 @@ pub const Surface = struct {
             self,
         );
         errdefer self.core_surface.deinit();
+        self.core_ready = true;
+        errdefer self.core_ready = false;
 
         // Headless surfaces have no view to lay out the renderer's
         // layer, so give it our initial size directly. (updateSize
