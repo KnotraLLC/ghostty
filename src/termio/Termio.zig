@@ -387,6 +387,7 @@ pub fn threadEnter(
         .loop = &thread.loop,
         .renderer_state = self.renderer_state,
         .surface_mailbox = self.surface_mailbox,
+        .stream_handler = &self.terminal_stream.handler,
         .mailbox = &self.mailbox,
         .backend = undefined, // Backend must replace this on threadEnter
     };
@@ -827,6 +828,10 @@ pub const ThreadData = struct {
     /// Mailboxes for different threads
     surface_mailbox: apprt.surface.Mailbox,
 
+    /// The parse stage's handler, for surface messages that must stay in
+    /// order with notifications it parked (see sendSurfaceMessage).
+    stream_handler: *StreamHandler,
+
     /// Data associated with the backend implementation (i.e. pty/exec state)
     backend: termio.backend.ThreadData,
     mailbox: *termio.Mailbox,
@@ -834,6 +839,15 @@ pub const ThreadData = struct {
     pub fn deinit(self: *ThreadData) void {
         self.backend.deinit(self.alloc);
         self.* = undefined;
+    }
+
+    /// Send a surface message from the termio thread without blocking on
+    /// the app mailbox and without overtaking notifications the parse
+    /// thread parked while the mailbox was full.
+    pub fn sendSurfaceMessage(self: *ThreadData, msg: apprt.surface.Message) void {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.stream_handler.queueSurfaceMessage(msg);
     }
 };
 
