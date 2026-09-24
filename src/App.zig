@@ -154,8 +154,17 @@ pub fn destroy(self: *App) void {
 /// events. This should be called by the application runtime on every loop
 /// tick.
 pub fn tick(self: *App, rt_app: *apprt.App) !void {
+    // Space just freed: deliver notifications parse threads parked while
+    // the mailbox was full (see termio/surface_backlog.zig). Deferred so a
+    // failed drain still flushes.
+    defer self.flushSurfaceBacklogs();
+
     // Drain our mailbox
     try self.drainMailbox(rt_app);
+}
+
+fn flushSurfaceBacklogs(self: *App) void {
+    for (self.surfaces.items) |surface| surface.core().flushSurfaceBacklog();
 }
 
 /// Update the configuration associated with the app. This can only be

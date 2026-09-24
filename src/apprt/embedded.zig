@@ -1686,6 +1686,31 @@ pub const CAPI = struct {
         }
     };
 
+    // ghostty_surface_io_health_s
+    const IoHealth = extern struct {
+        parsed_bytes: u64 = 0,
+        backlog_parked_total: u64 = 0,
+        pending_batches: u32 = 0,
+        ring_full: bool = false,
+        backlog_pending: bool = false,
+    };
+
+    /// Lock-free pty pipeline health for embedder stall detection.
+    /// `pending_batches > 0` (or `ring_full`) persisting while
+    /// `parsed_bytes` stays flat means the parse stage stopped draining
+    /// the pty.
+    export fn ghostty_surface_io_health(surface: *Surface, result: *IoHealth) void {
+        const io = &surface.core_surface.io;
+        const backlog = &io.terminal_stream.handler.surface_backlog;
+        result.* = .{
+            .parsed_bytes = io.io_health.parsed_bytes.load(.monotonic),
+            .backlog_parked_total = backlog.parked_total.load(.monotonic),
+            .pending_batches = io.io_health.pending_batches.load(.monotonic),
+            .ring_full = io.io_health.ring_full.load(.monotonic),
+            .backlog_pending = backlog.pending.load(.monotonic),
+        };
+    }
+
     // ghostty_prompt_snapshot_s
     const PromptSnapshot = extern struct {
         columns: u16 = 0,

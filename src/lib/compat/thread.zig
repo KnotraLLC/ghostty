@@ -58,18 +58,52 @@ pub fn waitTimeout(
         // timeout was specified and the deadline has passed, we remove ourselves as a waiter
         // and return `error.Timeout`. Otherwise, we'll loop back to the futex wait.
         result catch |err| {
-            const prev_state = cond.state.fetchSub(.{ .waiters = 1, .signals = 0 }, .monotonic);
-            assert(prev_state.waiters > 0); // underflow caused by illegal state
+            if (leaveOrConsume(cond)) return;
             return err;
         };
         switch (deadline) {
             .none => {},
             .deadline => |d| if (d.untilNow(io).raw.nanoseconds >= 0) {
-                const prev_state = cond.state.fetchSub(.{ .waiters = 1, .signals = 0 }, .monotonic);
-                assert(prev_state.waiters > 0); // underflow caused by illegal state
+                if (leaveOrConsume(cond)) return;
                 return error.Timeout;
             },
             .duration => unreachable,
         }
     }
+}
+
+/// Deregister a waiter that is giving up, unless a signal arrived since the
+/// last check. A plain `fetchSub` of `waiters` races with `signal`: the signal
+/// can land between our "no signals" load and the decrement, leaving
+/// `signals > 0` with no waiter to consume it. Every later `signal` then sees
+/// `waiters == signals` and wakes nobody, so a forever-waiter on the same
+/// condition sleeps permanently. Returns true when a signal was consumed
+/// instead (the caller was woken, not timed out).
+fn leaveOrConsume(cond: *std.Io.Condition) bool {
+    var prev_state = cond.state.load(.monotonic);
+    while (true) {
+        assert(prev_state.waiters > 0); // underflow caused by illegal state
+        const consume = prev_state.signals > 0;
+        prev_state = cond.state.cmpxchgWeak(prev_state, .{
+            .waiters = prev_state.waiters - 1,
+            .signals = if (consume) prev_state.signals - 1 else prev_state.signals,
+        }, .acquire, .monotonic) orelse return consume;
+    }
+}
+
+test "leaving waiter consumes a signal that raced its timeout" {
+    const testing = std.testing;
+    var cond: std.Io.Condition = .init;
+
+    // The signal landed after the timed-out waiter's last check.
+    cond.state.store(.{ .waiters = 1, .signals = 1 }, .monotonic);
+    try testing.expect(leaveOrConsume(&cond));
+    const after = cond.state.load(.monotonic);
+    try testing.expectEqual(@as(u16, 0), after.waiters);
+    try testing.expectEqual(@as(u16, 0), after.signals);
+
+    // No signal: plain deregistration, reported as a timeout.
+    cond.state.store(.{ .waiters = 2, .signals = 0 }, .monotonic);
+    try testing.expect(!leaveOrConsume(&cond));
+    try testing.expectEqual(@as(u16, 1), cond.state.load(.monotonic).waiters);
 }

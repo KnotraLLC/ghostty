@@ -12,6 +12,7 @@ const renderer = @import("../renderer.zig");
 const termio = @import("../termio.zig");
 const terminal = @import("../terminal/main.zig");
 const terminfo = @import("../terminfo/main.zig");
+const SurfaceBacklog = @import("surface_backlog.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
@@ -89,12 +90,16 @@ pub const StreamHandler = struct {
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
 
+    /// Surface notifications parked because the app mailbox was full.
+    surface_backlog: SurfaceBacklog = .{},
+
     pub const Stream = terminal.Stream(StreamHandler);
 
     /// True if we have tmux control mode built in.
     pub const tmux_enabled = terminal.options.tmux_control_mode;
 
     pub fn deinit(self: *StreamHandler) void {
+        self.surface_backlog.deinit(self.alloc);
         self.apc.deinit();
         self.dcs.deinit();
         self.kittyClipboardWriteAbort();
@@ -131,13 +136,39 @@ pub const StreamHandler = struct {
         self: *StreamHandler,
         msg: apprt.surface.Message,
     ) void {
-        // See messageWriter which has similar logic and explains why
-        // we may have to do this.
-        if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
+        // Never wait on the app mailbox with the renderer state locked:
+        // park the message (in order) and keep draining the pty. See
+        // SurfaceBacklog. Anything already parked goes first.
+        const backlog = &self.surface_backlog;
+        if (!backlog.pending.load(.acquire) or backlog.flush(self.surface_mailbox)) {
+            if (self.surface_mailbox.push(msg, .{ .instant = {} }) > 0) return;
+        }
+        if (!backlog.park(self.alloc, msg)) {
+            // Out of memory: the only remaining option is to wait for room.
+            // Order relative to parked messages is lost; delivery is not.
             self.renderer_state.mutex.unlock(global.io());
             defer self.renderer_state.mutex.lockUncancelable(global.io());
             _ = self.surface_mailbox.push(msg, .{ .forever = {} });
+            return;
         }
+
+        // Backpressure for a consumer that is not draining: stop parsing
+        // (lock released, so the app thread can flush) until the backlog is
+        // back under its limit. This bounds memory and, via the gather ring
+        // and the kernel pty queue, slows the child, as the blocking push
+        // used to, but without ever reordering or wedging on a lost wakeup.
+        while (backlog.overLimit() and !backlog.flush(self.surface_mailbox)) {
+            self.renderer_state.mutex.unlock(global.io());
+            defer self.renderer_state.mutex.lockUncancelable(global.io());
+            global.io().sleep(.fromMilliseconds(5), .awake) catch {};
+        }
+    }
+
+    /// Deliver parked surface notifications without blocking. Caller holds
+    /// the renderer state mutex. Called by the app thread after draining
+    /// its mailbox so a parser that went idle does not strand them.
+    pub fn flushSurfaceBacklog(self: *StreamHandler) void {
+        _ = self.surface_backlog.flush(self.surface_mailbox);
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
