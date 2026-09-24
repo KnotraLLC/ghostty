@@ -470,6 +470,17 @@ typedef struct {
   uintptr_t text_len;
 } ghostty_prompt_snapshot_s;
 
+// Lock-free pty pipeline health. `pending_batches > 0` (or `ring_full`)
+// persisting while `parsed_bytes` stays flat means the parse stage stopped
+// draining the pty.
+typedef struct {
+  uint64_t parsed_bytes;
+  uint64_t backlog_parked_total;
+  uint32_t pending_batches;
+  bool ring_full;
+  bool backlog_pending;
+} ghostty_surface_io_health_s;
+
 // A complete, versioned DMS1 snapshot of the active terminal screen. The
 // bytes are little-endian and must be released with
 // ghostty_surface_free_mobile_snapshot exactly once after a successful read.
@@ -1333,6 +1344,9 @@ GHOSTTY_API bool ghostty_surface_read_prompt_snapshot(ghostty_surface_t,
 // Frees a successful prompt snapshot and zeroes `result`.
 GHOSTTY_API void ghostty_surface_free_prompt_snapshot(ghostty_surface_t,
                                                         ghostty_prompt_snapshot_s*);
+
+GHOSTTY_API void ghostty_surface_io_health(ghostty_surface_t,
+                                           ghostty_surface_io_health_s*);
 
 // Reads only the active screen. The output is never partial: on a non-OK
 // result, `out` is reset and owns no allocation.

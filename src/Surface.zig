@@ -1555,6 +1555,23 @@ fn searchCallback_(
     }
 }
 
+/// App thread: deliver surface notifications the pty parse thread parked
+/// while the app mailbox was full. Cheap when nothing is parked. Never
+/// waits for the renderer state: during a flood the parse thread holds it
+/// in a hot loop, and blocking here would stall the apprt's event loop.
+/// A busy parse thread flushes on its own next message; otherwise the
+/// next tick retries.
+/// ponytail: relies on the apprt ticking periodically (Drova's host ticks
+/// at least every 250ms); a wakeup-only apprt could hold parked state
+/// until its next wakeup.
+pub fn flushSurfaceBacklog(self: *Surface) void {
+    const handler = &self.io.terminal_stream.handler;
+    if (!handler.surface_backlog.pending.load(.acquire)) return;
+    if (!self.renderer_state.mutex.tryLock()) return;
+    defer self.renderer_state.mutex.unlock(global.io());
+    handler.flushSurfaceBacklog();
+}
+
 /// Call this when modifiers change. This is safe to call even if modifiers
 /// match the previous state.
 ///

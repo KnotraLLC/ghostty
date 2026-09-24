@@ -29,6 +29,7 @@ const PasswdEntry = internal_os.passwd.Entry;
 const windows = internal_os.windows;
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const compat_fd = @import("../lib/compat/fd.zig");
+const compat_thread = @import("../lib/compat/thread.zig");
 
 const log = std.log.scoped(.io_exec);
 
@@ -1415,6 +1416,22 @@ pub const ReadThread = struct {
         bufs: [buffer_count][buffer_capacity]u8 = undefined,
     };
 
+    /// Pipeline waits re-check their condition at least this often. The
+    /// wakeups are the fast path; the slices bound the cost of a lost one
+    /// (a lost wake here freezes output while input keeps working).
+    const idle_slice_ms = 250;
+    const full_slice_ms = 50;
+
+    fn sliceWait(cond: *std.Io.Condition, mutex: *std.Io.Mutex, ms: i64) void {
+        compat_thread.waitTimeout(cond, global.io(), mutex, .{ .duration = .{
+            .raw = .fromMilliseconds(ms),
+            .clock = .awake,
+        } }) catch |err| switch (err) {
+            error.Timeout => {},
+            error.Canceled => unreachable, // plain threads, never canceled
+        };
+    }
+
     fn threadMainPosix(fd: posix.fd_t, io: *termio.Termio, quit: posix.fd_t) void {
         // Always close our end of the pipe when we exit.
         defer _ = posix.system.close(quit);
@@ -1468,7 +1485,7 @@ pub const ReadThread = struct {
         const gather_thread = std.Thread.spawn(
             .{},
             gatherMainPosix,
-            .{ fd, quit, &pipeline },
+            .{ fd, quit, &pipeline, &io.io_health },
         ) catch |err| {
             // If we can't spawn a thread the process is already
             // doomed (every surface spawns several), so don't try
@@ -1490,7 +1507,7 @@ pub const ReadThread = struct {
                 defer pipeline.mutex.unlock(global.io());
                 while (pipeline.count == 0) {
                     if (pipeline.done) return;
-                    pipeline.batch_ready.waitUncancelable(global.io(), &pipeline.mutex);
+                    sliceWait(&pipeline.batch_ready, &pipeline.mutex, idle_slice_ms);
                 }
                 const slot = pipeline.tail;
                 break :batch pipeline.bufs[slot][0..pipeline.lens[slot]];
@@ -1499,11 +1516,13 @@ pub const ReadThread = struct {
             // The batch buffer is owned by this stage until we advance
             // the tail below, so it is safe to read outside the lock.
             io.processOutput(batch);
+            _ = io.io_health.parsed_bytes.fetchAdd(batch.len, .monotonic);
 
             {
                 pipeline.mutex.lockUncancelable(global.io());
                 pipeline.tail = (pipeline.tail + 1) % buffer_count;
                 pipeline.count -= 1;
+                io.io_health.pending_batches.store(pipeline.count, .monotonic);
                 const wake = pipeline.count == 0 and
                     pipeline.bridging and
                     pipeline.idle_write_fd >= 0;
@@ -1529,7 +1548,12 @@ pub const ReadThread = struct {
     /// bridging the kernel queue's refill gaps for saturated streams,
     /// and publishes each batch to the parse stage. This thread owns
     /// all fd monitoring, including the quit fd.
-    fn gatherMainPosix(fd: posix.fd_t, quit: posix.fd_t, pipeline: *Pipeline) void {
+    fn gatherMainPosix(
+        fd: posix.fd_t,
+        quit: posix.fd_t,
+        pipeline: *Pipeline,
+        health: *termio.Termio.IoHealth,
+    ) void {
         if (builtin.os.tag.isDarwin()) {
             internal_os.macos.pthread_setname_np(&"io-gather".*);
             setQosClass();
@@ -1562,8 +1586,12 @@ pub const ReadThread = struct {
             const buf: *[buffer_capacity]u8 = buf: {
                 pipeline.mutex.lockUncancelable(global.io());
                 defer pipeline.mutex.unlock(global.io());
-                while (pipeline.count == buffer_count) {
-                    pipeline.slot_free.waitUncancelable(global.io(), &pipeline.mutex);
+                if (pipeline.count == buffer_count) {
+                    health.ring_full.store(true, .monotonic);
+                    defer health.ring_full.store(false, .monotonic);
+                    while (pipeline.count == buffer_count) {
+                        sliceWait(&pipeline.slot_free, &pipeline.mutex, full_slice_ms);
+                    }
                 }
                 break :buf &pipeline.bufs[pipeline.head];
             };
@@ -1706,6 +1734,7 @@ pub const ReadThread = struct {
                 pipeline.lens[pipeline.head] = total;
                 pipeline.head = (pipeline.head + 1) % buffer_count;
                 pipeline.count += 1;
+                health.pending_batches.store(pipeline.count, .monotonic);
                 pipeline.mutex.unlock(global.io());
                 pipeline.batch_ready.signal(global.io());
             }

@@ -65,6 +65,10 @@ mailbox: termio.Mailbox,
 /// from the child process and calls callbacks in the stream handler.
 terminal_stream: StreamHandler.Stream,
 
+/// Lock-free pty pipeline counters so an embedder can tell a quiet child
+/// from a parse stage that stopped draining the pty.
+io_health: IoHealth = .{},
+
 /// Last time the cursor was reset. This is used to prevent message
 /// flooding with cursor resets.
 last_cursor_reset: ?std.Io.Timestamp = null,
@@ -160,6 +164,18 @@ const ThreadEnterState = struct {
             }
         }
     };
+};
+
+pub const IoHealth = struct {
+    /// Bytes the parse stage has consumed from the pty.
+    parsed_bytes: std.atomic.Value(u64) = .init(0),
+    /// True while the gather stage waits because every buffer is queued
+    /// for the parse stage (the pty is not being read).
+    ring_full: std.atomic.Value(bool) = .init(false),
+    /// Gathered batches waiting for the parse stage. Non-zero while
+    /// `parsed_bytes` stays flat means the parse stage is not running,
+    /// even when too little output is waiting to fill the ring.
+    pending_batches: std.atomic.Value(u32) = .init(0),
 };
 
 /// The configuration for this IO that is derived from the main

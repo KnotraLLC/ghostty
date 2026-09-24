@@ -41,6 +41,11 @@ pub fn BlockingQueue(
         // The bounds of this queue. We recast this to Size so we can do math.
         const bounds: Size = @intCast(capacity);
 
+        /// Longest single sleep of a `.forever` push before it re-checks
+        /// for space. Wakeups are the fast path; this bounds the damage of
+        /// a missed one.
+        const forever_slice_ns = 50 * std.time.ns_per_ms;
+
         /// Specifies the timeout for an operation.
         pub const Timeout = union(enum) {
             /// Fail instantly (non-blocking).
@@ -110,9 +115,27 @@ pub fn BlockingQueue(
                     .instant => return 0,
 
                     .forever => {
+                        // Wait in bounded slices and re-check. A lost or
+                        // misdirected wakeup must cost one slice, not the
+                        // producer: a parked io-reader stops draining the
+                        // pty and freezes the surface while input still
+                        // works. See `forever_slice_ns`.
                         self.not_full_waiters += 1;
                         defer self.not_full_waiters -= 1;
-                        self.cond_not_full.waitUncancelable(io, &self.mutex);
+                        while (self.full()) {
+                            compat_thread.waitTimeout(
+                                &self.cond_not_full,
+                                io,
+                                &self.mutex,
+                                .{ .duration = .{
+                                    .raw = .fromNanoseconds(forever_slice_ns),
+                                    .clock = .awake,
+                                } },
+                            ) catch |err| switch (err) {
+                                error.Timeout => {},
+                                error.Canceled => unreachable, // uncancelable callers
+                            };
+                        }
                     },
 
                     .ns => |ns| {
@@ -192,8 +215,10 @@ pub fn BlockingQueue(
             }
 
             pub fn deinit(self: *DrainIterator, io: std.Io) void {
-                // If we have consumers waiting on a full queue, notify.
-                if (self.queue.not_full_waiters > 0) self.queue.cond_not_full.signal(io);
+                // A drain can free every slot, so wake every producer
+                // waiting on a full queue; `signal` would wake only one
+                // and leave the rest asleep beside free space.
+                if (self.queue.not_full_waiters > 0) self.queue.cond_not_full.broadcast(io);
 
                 // Unlock
                 self.queue.mutex.unlock(io);
@@ -258,4 +283,33 @@ test "timed push" {
 
     // Timed push should fail
     try testing.expectEqual(@as(Q.Size, 0), q.push(io, 2, .{ .ns = 1000 }));
+}
+
+test "forever push survives a lost wakeup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 1, .{ .instant = {} }));
+
+    // Free the slot the way a missed wakeup looks to the producer: space
+    // appears but the condition is never signaled.
+    const Silent = struct {
+        fn run(queue: *Q, qio: std.Io) void {
+            qio.sleep(.fromMilliseconds(10), .awake) catch {};
+            queue.mutex.lockUncancelable(qio);
+            defer queue.mutex.unlock(qio);
+            queue.read = (queue.read + 1) % 1;
+            queue.len -= 1;
+        }
+    };
+    const t = try std.Thread.spawn(.{}, Silent.run, .{ q, io });
+    defer t.join();
+
+    // Without bounded waits this blocks forever.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(io, 2, .{ .forever = {} }));
+    try testing.expect(q.pop(io).? == 2);
 }
