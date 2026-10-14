@@ -2212,6 +2212,60 @@ pub const CAPI = struct {
         result.deinit();
     }
 
+    /// Read bounded context text for an embedder-owned copy action. Kind 0
+    /// is the last `max_lines` (1-500) rows of scrollback and screen ending
+    /// at the cursor or the last active row with text; kind 1 is the most
+    /// recent completed command (command line through output) located with
+    /// semantic prompt marks. The text is at most 1 MiB, keeps the most
+    /// recent end when capped, and is formatted while the renderer state
+    /// remains locked. Returns false (with `result` zeroed) when nothing is
+    /// available or the arguments are invalid; on success free the result
+    /// with ghostty_surface_free_text. Nothing is written to the clipboard.
+    export fn ghostty_surface_read_context_text(
+        surface: *Surface,
+        kind: u8,
+        max_lines: u32,
+        result: *Text,
+    ) bool {
+        result.* = .{
+            .tl_px_x = -1,
+            .tl_px_y = -1,
+            .offset_start = 0,
+            .offset_len = 0,
+            .text = null,
+            .text_len = 0,
+        };
+
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
+
+        const text = terminal.context_text.read(
+            global.alloc(),
+            core_surface.renderer_state.terminal.screens.active,
+            kind,
+            max_lines,
+        ) catch |err| {
+            log.debug("context text unavailable err={}", .{err});
+            return false;
+        };
+        result.text = text.ptr;
+        result.text_len = text.len;
+        return true;
+    }
+
+    /// True when the active screen has a completed command that
+    /// ghostty_surface_read_context_text kind 1 can return (shell
+    /// integration prompt marks are present). Reads row metadata only.
+    export fn ghostty_surface_has_last_command(surface: *Surface) bool {
+        const core_surface = &surface.core_surface;
+        core_surface.renderer_state.mutex.lockUncancelable(global.io());
+        defer core_surface.renderer_state.mutex.unlock(global.io());
+        return terminal.context_text.hasLastCommand(
+            core_surface.renderer_state.terminal.screens.active,
+        );
+    }
+
     /// Read a complete, bounded DMS1 snapshot of the active terminal screen.
     /// The copy and its terminal metadata are captured while the renderer
     /// state mutex is held; callers own the result until the matching free.
