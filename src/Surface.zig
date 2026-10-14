@@ -337,6 +337,7 @@ const DerivedConfig = struct {
     links: []DerivedConfig.Link,
     link_osc8: bool,
     link_previews: configpkg.LinkPreviews,
+    link_click_modifiers: configpkg.Config.LinkClickModifiers,
     scroll_to_bottom: configpkg.Config.ScrollToBottom,
     notify_on_command_finish: configpkg.Config.NotifyOnCommandFinish,
     notify_on_command_finish_action: configpkg.Config.NotifyOnCommandFinishAction,
@@ -418,6 +419,7 @@ const DerivedConfig = struct {
             .links = links,
             .link_osc8 = config.@"link-osc8",
             .link_previews = config.@"link-previews",
+            .link_click_modifiers = config.@"link-click-modifiers",
             .scroll_to_bottom = config.@"scroll-to-bottom",
             .notify_on_command_finish = config.@"notify-on-command-finish",
             .notify_on_command_finish_action = config.@"notify-on-command-finish-action",
@@ -4088,11 +4090,29 @@ pub fn mouseButtonCallback(
         // Handle link clicking. We want to do this before we do mouse
         // reporting or any other mouse handling because a successfully
         // clicked link will swallow the event.
-        if (self.mouse.over_link and !self.mouse.selection_gesture.left_click_dragged) {
+        //
+        // With `link-click-modifiers = optional` a release that isn't over a
+        // hovered link (because the modifiers didn't match) may still open
+        // the link under the cursor; see linkClickIgnoresMods.
+        const click_ignores_mods = !self.mouse.over_link and linkClickIgnoresMods(.{
+            .policy = self.config.link_click_modifiers,
+            .mods = self.mouse.mods,
+            .mouse_reporting = self.isMouseReporting(),
+            .dragged = self.mouse.selection_gesture.left_click_dragged,
+            .click_count = self.mouse.selection_gesture.left_click_count,
+            .selection = self.io.terminal.screens.active.selection != null,
+        });
+        if ((self.mouse.over_link or click_ignores_mods) and
+            !self.mouse.selection_gesture.left_click_dragged)
+        {
             // We are holding the renderer lock, but this should just be
             // a cached value.
             const pos = release_pos orelse try self.rt_surface.getCursorPos();
-            if (self.processLinks(pos)) |processed| {
+            const link_mods: ?input.Mods = if (click_ignores_mods)
+                null
+            else
+                self.mouseModsWithCapture(self.mouse.mods);
+            if (self.processLinks(pos, link_mods)) |processed| {
                 if (processed) return true;
             } else |err| {
                 log.warn("error processing links err={}", .{err});
@@ -4484,6 +4504,19 @@ fn linkAtPos(
     self: *Surface,
     pos: apprt.CursorPos,
 ) !?Link {
+    return try self.linkAtPosMods(pos, self.mouseModsWithCapture(self.mouse.mods));
+}
+
+/// Returns the link at the given cursor position, if any. If mouse_mods is
+/// null then modifier requirements are ignored for OSC 8 hyperlinks and all
+/// configured links (see linkAtPin).
+///
+/// Requires the renderer mutex is held.
+fn linkAtPosMods(
+    self: *Surface,
+    pos: apprt.CursorPos,
+    mouse_mods: ?input.Mods,
+) !?Link {
     // Convert our cursor position to a screen point.
     const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
     const mouse_pin: terminal.Pin = mouse_pin: {
@@ -4495,12 +4528,9 @@ fn linkAtPos(
         break :mouse_pin pin;
     };
 
-    // Get our comparison mods
-    const mouse_mods = self.mouseModsWithCapture(self.mouse.mods);
-
     // If we have the proper modifiers set then we can check for OSC8 links.
     if (self.config.link_osc8 and
-        mouse_mods.equal(input.ctrlOrSuper(.{})))
+        (mouse_mods == null or mouse_mods.?.equal(input.ctrlOrSuper(.{}))))
     hyperlink: {
         const rac = mouse_pin.rowAndCell();
         const cell = rac.cell;
@@ -4583,12 +4613,39 @@ fn mouseModsWithCapture(self: *Surface, mods: input.Mods) input.Mods {
     return final;
 }
 
+/// The state of a left click release that linkClickIgnoresMods inspects.
+const LinkClick = struct {
+    policy: configpkg.Config.LinkClickModifiers,
+    mods: input.Mods,
+    mouse_reporting: bool,
+    dragged: bool,
+    click_count: u3,
+    selection: bool,
+};
+
+/// Whether a left click release that is not over a hovered link should
+/// still open the link under the cursor, ignoring the link's modifier
+/// requirements. Only `link-click-modifiers = optional` allows this, and only
+/// for a single click that did not drag or select, with no modifiers or with
+/// shift plus control (Linux) / command (macOS). While the program has
+/// requested mouse reporting the click belongs to the program.
+fn linkClickIgnoresMods(opts: LinkClick) bool {
+    if (opts.policy != .optional) return false;
+    if (opts.mouse_reporting or opts.dragged or opts.selection) return false;
+    if (opts.click_count != 1) return false;
+
+    const mods = opts.mods.binding();
+    if (mods.empty()) return true;
+    return mods.equal(input.ctrlOrSuper(.{ .shift = true }));
+}
+
 /// Attempt to invoke the action of any link that is under the
-/// given position.
+/// given position. If mouse_mods is null then modifier requirements are
+/// ignored.
 ///
 /// Requires the renderer state mutex is held.
-fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
-    const link = try self.linkAtPos(pos) orelse return false;
+fn processLinks(self: *Surface, pos: apprt.CursorPos, mouse_mods: ?input.Mods) !bool {
+    const link = try self.linkAtPosMods(pos, mouse_mods) orelse return false;
     switch (link.action) {
         .open => {
             const str = try self.io.terminal.screens.active.selectionString(self.alloc, .{
@@ -6797,4 +6854,88 @@ test "scroll policy retains half discrete ticks for fractional accumulation" {
     try testing.expectEqual(@as(isize, 0), horizontal_first.delta);
     const horizontal_second = scrollStep(horizontal_first.remainder, cell_height * 0.5, cell_height);
     try testing.expectEqual(@as(isize, 1), horizontal_second.delta);
+}
+
+test "link click modifiers: required keeps hover-only link clicks" {
+    const testing = std.testing;
+    try testing.expect(!linkClickIgnoresMods(.{
+        .policy = .required,
+        .mods = .{},
+        .mouse_reporting = false,
+        .dragged = false,
+        .click_count = 1,
+        .selection = false,
+    }));
+    try testing.expect(!linkClickIgnoresMods(.{
+        .policy = .required,
+        .mods = input.ctrlOrSuper(.{ .shift = true }),
+        .mouse_reporting = false,
+        .dragged = false,
+        .click_count = 1,
+        .selection = false,
+    }));
+}
+
+test "link click modifiers: optional opens plain and shifted link clicks" {
+    const testing = std.testing;
+    const base: LinkClick = .{
+        .policy = .optional,
+        .mods = .{},
+        .mouse_reporting = false,
+        .dragged = false,
+        .click_count = 1,
+        .selection = false,
+    };
+    try testing.expect(linkClickIgnoresMods(base));
+
+    var shifted = base;
+    shifted.mods = input.ctrlOrSuper(.{ .shift = true });
+    try testing.expect(linkClickIgnoresMods(shifted));
+
+    // Lock keys and sided modifiers do not change the decision.
+    var locked = base;
+    locked.mods = .{ .caps_lock = true, .num_lock = true };
+    try testing.expect(linkClickIgnoresMods(locked));
+
+    // Other combinations keep their existing meaning (selection extension,
+    // rectangle selection, ...).
+    var shift_only = base;
+    shift_only.mods = .{ .shift = true };
+    try testing.expect(!linkClickIgnoresMods(shift_only));
+    var alt = base;
+    alt.mods = .{ .alt = true };
+    try testing.expect(!linkClickIgnoresMods(alt));
+}
+
+test "link click modifiers: optional never takes drags, selections, or reported clicks" {
+    const testing = std.testing;
+    const base: LinkClick = .{
+        .policy = .optional,
+        .mods = .{},
+        .mouse_reporting = false,
+        .dragged = false,
+        .click_count = 1,
+        .selection = false,
+    };
+
+    var reporting = base;
+    reporting.mouse_reporting = true;
+    try testing.expect(!linkClickIgnoresMods(reporting));
+    reporting.mods = input.ctrlOrSuper(.{ .shift = true });
+    try testing.expect(!linkClickIgnoresMods(reporting));
+
+    var dragged = base;
+    dragged.dragged = true;
+    try testing.expect(!linkClickIgnoresMods(dragged));
+
+    var selected = base;
+    selected.selection = true;
+    try testing.expect(!linkClickIgnoresMods(selected));
+
+    var double = base;
+    double.click_count = 2;
+    try testing.expect(!linkClickIgnoresMods(double));
+    var none = base;
+    none.click_count = 0;
+    try testing.expect(!linkClickIgnoresMods(none));
 }

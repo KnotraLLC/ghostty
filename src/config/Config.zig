@@ -1491,6 +1491,24 @@ link: RepeatableLink = .{},
 /// Available since: 1.2.0
 @"link-previews": LinkPreviews = .true,
 
+/// Which modifiers a left click needs to open a URL or OSC 8 hyperlink.
+///
+/// Valid values:
+///
+///   * `required` - A link opens only when its configured modifiers are held
+///     (control on Linux, command on macOS for URLs and OSC 8 hyperlinks).
+///
+///   * `optional` - A link also opens on a plain left click, or with shift
+///     held together with control (Linux) or command (macOS). Clicks that
+///     extend into a drag or a selection never open a link, and while the
+///     running program has requested mouse reporting a plain click is
+///     reported to the program as usual, so only the configured modifiers
+///     reach links. This is meant for embedders that decide what a link click
+///     does based on the modifiers of the click.
+///
+/// Hover highlighting and link previews are unchanged.
+@"link-click-modifiers": LinkClickModifiers = .required,
+
 /// Whether to start the window in a maximized state. This setting applies
 /// to new windows and does not apply to tabs, splits, etc. However, this setting
 /// will apply to all new windows, not just the first one.
@@ -5480,6 +5498,12 @@ pub const LinkPreviews = enum {
     false,
     true,
     osc8,
+};
+
+/// See link-click-modifiers
+pub const LinkClickModifiers = enum {
+    required,
+    optional,
 };
 
 /// See working-directory
