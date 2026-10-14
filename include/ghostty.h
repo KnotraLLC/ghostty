@@ -1344,6 +1344,17 @@ GHOSTTY_API bool ghostty_surface_read_prompt_snapshot(ghostty_surface_t,
 // Frees a successful prompt snapshot and zeroes `result`.
 GHOSTTY_API void ghostty_surface_free_prompt_snapshot(ghostty_surface_t,
                                                         ghostty_prompt_snapshot_s*);
+// Reads bounded context text without touching the clipboard. kind 0 is the
+// last `max_lines` (1-500) rows of scrollback and screen; kind 1 is the most
+// recent completed command and its output, located with shell-integration
+// prompt marks. At most 1 MiB, most recent end kept. On failure `result` is
+// zeroed; on success free it with ghostty_surface_free_text.
+GHOSTTY_API bool ghostty_surface_read_context_text(ghostty_surface_t,
+                                                   uint8_t kind,
+                                                   uint32_t max_lines,
+                                                   ghostty_text_s*);
+// True when kind 1 of ghostty_surface_read_context_text has a command to read.
+GHOSTTY_API bool ghostty_surface_has_last_command(ghostty_surface_t);
 
 GHOSTTY_API void ghostty_surface_io_health(ghostty_surface_t,
                                            ghostty_surface_io_health_s*);

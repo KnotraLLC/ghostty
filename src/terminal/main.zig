@@ -10,6 +10,7 @@ pub const dcs = @import("dcs.zig");
 pub const osc = @import("osc.zig");
 pub const point = @import("point.zig");
 pub const prompt_snapshot = @import("prompt_snapshot.zig");
+pub const context_text = @import("context_text.zig");
 pub const mobile_snapshot = @import("mobile_snapshot.zig");
 pub const color = @import("color.zig");
 pub const clipboard = @import("clipboard.zig");
