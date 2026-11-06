@@ -1264,6 +1264,15 @@ GHOSTTY_API ghostty_surface_config_s ghostty_surface_config_new();
 
 GHOSTTY_API ghostty_surface_t ghostty_surface_new(ghostty_app_t,
                                                      const ghostty_surface_config_s*);
+typedef enum GHOSTTY_ENUM_TYPED {
+  GHOSTTY_SURFACE_REPLY_POLICY_NORMAL = 0,
+  GHOSTTY_SURFACE_REPLY_POLICY_SUPPRESS_GENERATED = 1,
+} ghostty_surface_reply_policy_e;
+/* Fixed before parser/PTY I/O begins. Suppression only affects generated
+ * protocol replies; keyboard, paste, mouse and clipboard UI effects remain
+ * on their existing independent paths. */
+GHOSTTY_API ghostty_surface_t ghostty_surface_new_with_reply_policy(
+    ghostty_app_t, const ghostty_surface_config_s*, ghostty_surface_reply_policy_e);
 GHOSTTY_API void ghostty_surface_free(ghostty_surface_t);
 GHOSTTY_API void* ghostty_surface_userdata(ghostty_surface_t);
 GHOSTTY_API ghostty_app_t ghostty_surface_app(ghostty_surface_t);

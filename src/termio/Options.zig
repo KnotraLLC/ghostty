@@ -39,3 +39,7 @@ renderer_mailbox: *renderer.Thread.Mailbox,
 
 /// The mailbox for sending the surface messages.
 surface_mailbox: apprt.surface.Mailbox,
+
+/// Immutable surface creation policy. It is consumed before the parser and
+/// PTY start and only drops parser-generated writes, never user input.
+suppress_generated_replies: bool = false,

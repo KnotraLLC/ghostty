@@ -159,6 +159,12 @@ pub const Handler = struct {
         /// if it needs to be stored or used after the call returns.
         write_pty: ?*const fn (*Handler, []const u8) void,
 
+        /// A parser-originated reply. Unlike write_pty, this is never used
+        /// for embedder input such as paste. It is synchronous and runs in
+        /// parser order, so embedders may record a bounded logical reply
+        /// receipt without inferring it from arbitrary PTY writes.
+        write_generated_reply: ?*const fn (*Handler, GeneratedReplyKind, []const u8) void = null,
+
         /// Called when the bell is rung (BEL).
         bell: ?*const fn (*Handler) void,
 
@@ -345,6 +351,19 @@ pub const Handler = struct {
             .write_pty = null,
             .xtversion = null,
         };
+    };
+
+    pub const GeneratedReplyKind = enum(c_int) {
+        device_status,
+        device_attributes,
+        mode,
+        decrqss,
+        xtgettcap,
+        xtversion,
+        enquiry,
+        osc_color,
+        kitty_keyboard,
+        size,
     };
 
     /// A sequence this library does not implement, passed to the
@@ -808,6 +827,22 @@ pub const Handler = struct {
         func(self, data);
     }
 
+    inline fn writeGeneratedReply(
+        self: *Handler,
+        kind: GeneratedReplyKind,
+        data: []const u8,
+    ) void {
+        if (self.effects.write_generated_reply) |func| {
+            func(self, kind, data);
+            return;
+        }
+        self.writePty(data);
+    }
+
+    inline fn canWriteGeneratedReply(self: *const Handler) bool {
+        return self.effects.write_generated_reply != null or self.effects.write_pty != null;
+    }
+
     fn dcsHook(self: *Handler, value: Action.Value(.dcs_hook)) !void {
         var cmd = self.dcs_handler.hook(
             self.terminal.gpa(),
@@ -840,18 +875,18 @@ pub const Handler = struct {
                     response[0 .. response.len - 1],
                 );
                 response[encoded.len] = 0;
-                self.writePty(response[0..encoded.len :0]);
+                self.writeGeneratedReply(.decrqss, response[0..encoded.len :0]);
             },
 
             .xtgettcap => |*gettcap| {
-                if (self.effects.write_pty == null) return;
+                if (!self.canWriteGeneratedReply()) return;
                 const map = comptime terminfo.ghostty.xtgettcapMap();
                 while (gettcap.next()) |key| {
                     if (std.mem.eql(u8, key, encoded_tn_key)) {
                         self.writeTerminfoName();
                         continue;
                     }
-                    self.writePty(map.get(key) orelse continue);
+                    self.writeGeneratedReply(.xtgettcap, map.get(key) orelse continue);
                 }
             },
 
@@ -881,7 +916,7 @@ pub const Handler = struct {
         // Values are hex-encoded uppercase, matching the static map. The
         // buffer fits any name allowed above, so the print cannot fail.
         var buf: [max_tn_response_bytes]u8 = undefined;
-        self.writePty(std.fmt.bufPrintZ(
+        self.writeGeneratedReply(.xtgettcap, std.fmt.bufPrintZ(
             &buf,
             "\x1bP1+r" ++ encoded_tn_key ++ "={X}\x1b\\",
             .{name},
@@ -1698,7 +1733,7 @@ pub const Handler = struct {
 
         const written = aw.toOwnedSliceSentinel(0) catch return;
         defer alloc.free(written);
-        self.writePty(written);
+        self.writeGeneratedReply(.device_attributes, written);
     }
 
     /// The cursor position for a CPR/DECXCPR report, honoring origin mode
@@ -1715,7 +1750,7 @@ pub const Handler = struct {
 
     fn deviceStatus(self: *Handler, req: device_status.Request) void {
         switch (req) {
-            .operating_status => self.writePty("\x1B[0n"),
+            .operating_status => self.writeGeneratedReply(.device_status, "\x1B[0n"),
 
             .cursor_position => {
                 const pos = self.cursorReportPos();
@@ -1725,7 +1760,7 @@ pub const Handler = struct {
                     pos.y + 1,
                     pos.x + 1,
                 }) catch return;
-                self.writePty(resp);
+                self.writeGeneratedReply(.device_status, resp);
             },
 
             // DECXCPR: extended cursor position adds a page number. Ghostty has
@@ -1738,7 +1773,7 @@ pub const Handler = struct {
                     pos.y + 1,
                     pos.x + 1,
                 }) catch return;
-                self.writePty(resp);
+                self.writeGeneratedReply(.device_status, resp);
             },
 
             .color_scheme => {
@@ -1748,7 +1783,7 @@ pub const Handler = struct {
                 var writer: std.Io.Writer = .fixed(buf[0..device_status.max_color_scheme_report_encode_size]);
                 device_status.encodeColorSchemeReport(&writer, scheme) catch return;
                 buf[writer.end] = 0;
-                self.writePty(buf[0..writer.end :0]);
+                self.writeGeneratedReply(.device_status, buf[0..writer.end :0]);
             },
 
             .visibility => self.sendVisibilityReport(),
@@ -1756,8 +1791,6 @@ pub const Handler = struct {
     }
 
     fn sendVisibilityReport(self: *Handler) void {
-        const write_pty = self.effects.write_pty orelse return;
-
         var buf: [device_status.max_visibility_report_encode_size + 1]u8 = undefined;
         var writer: std.Io.Writer = .fixed(buf[0..device_status.max_visibility_report_encode_size]);
         device_status.encodeVisibilityReport(
@@ -1765,7 +1798,7 @@ pub const Handler = struct {
             if (self.terminal.flags.visible) .potentially_visible else .not_visible,
         ) catch return;
         buf[writer.end] = 0;
-        write_pty(self, buf[0..writer.end :0]);
+        self.writeGeneratedReply(.device_status, buf[0..writer.end :0]);
     }
 
     fn reportEnquiry(self: *Handler) void {
@@ -1776,7 +1809,7 @@ pub const Handler = struct {
         if (response.len >= buf.len) return;
         @memcpy(buf[0..response.len], response);
         buf[response.len] = 0;
-        self.writePty(buf[0..response.len :0]);
+        self.writeGeneratedReply(.enquiry, buf[0..response.len :0]);
     }
 
     fn reportXtversion(self: *Handler) void {
@@ -1787,7 +1820,7 @@ pub const Handler = struct {
             "\x1BP>|{s}\x1B\\",
             .{if (version.len > 0) version else "libghostty"},
         ) catch return;
-        self.writePty(resp);
+        self.writeGeneratedReply(.xtversion, resp);
     }
 
     fn reportXtChecksum(self: *Handler, req: xt_checksum.Request) void {
@@ -1848,7 +1881,7 @@ pub const Handler = struct {
 
         const resp = aw.toOwnedSliceSentinel(0) catch return;
         defer alloc.free(resp);
-        self.writePty(resp);
+        self.writeGeneratedReply(.size, resp);
     }
 
     fn reportMode2048(self: *Handler) void {
@@ -1859,7 +1892,7 @@ pub const Handler = struct {
         var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
         size_report.encode(&writer, .mode_2048, current) catch return;
         buf[writer.end] = 0;
-        self.writePty(buf[0..writer.end :0]);
+        self.writeGeneratedReply(.size, buf[0..writer.end :0]);
     }
 
     fn windowTitle(self: *Handler, title_raw: []const u8) !void {
@@ -1930,7 +1963,7 @@ pub const Handler = struct {
         };
         const len = writer.buffered().len;
         buf[len] = 0;
-        self.writePty(buf[0..len :0]);
+        self.writeGeneratedReply(.mode, buf[0..len :0]);
     }
 
     fn queryKittyKeyboard(self: *Handler) void {
@@ -1939,7 +1972,7 @@ pub const Handler = struct {
         const resp = std.fmt.bufPrintZ(&buf, "\x1b[?{}u", .{
             self.terminal.screens.active.kitty_keyboard.current().int(),
         }) catch return;
-        self.writePty(resp);
+        self.writeGeneratedReply(.kitty_keyboard, resp);
     }
 
     inline fn horizontalTab(self: *Handler, count: u16) void {
@@ -2132,7 +2165,7 @@ pub const Handler = struct {
                 },
 
                 .query => |target| {
-                    if (self.effects.write_pty == null) continue;
+                    if (!self.canWriteGeneratedReply()) continue;
                     const c = self.terminal.colorForXterm(target) orelse continue;
                     try writeXtermColorReport(writer, target, c, terminator);
                 },
@@ -2144,7 +2177,7 @@ pub const Handler = struct {
         if (response.written().len > 0) {
             const resp = try response.toOwnedSliceSentinel(0);
             defer alloc.free(resp);
-            self.writePty(resp);
+            self.writeGeneratedReply(.osc_color, resp);
         }
     }
 
@@ -2219,7 +2252,7 @@ pub const Handler = struct {
                     },
                 },
                 .query => |key| {
-                    if (self.effects.write_pty == null) continue;
+                    if (!self.canWriteGeneratedReply()) continue;
                     const c = self.terminal.colorForKitty(key) orelse {
                         if (!key.hasTerminalQueryColor()) continue;
                         if (response.written().len == 0) try writer.writeAll("\x1b]21");
@@ -2238,7 +2271,7 @@ pub const Handler = struct {
             try writer.writeAll(request.terminator.string());
             const resp = try response.toOwnedSliceSentinel(0);
             defer alloc.free(resp);
-            self.writePty(resp);
+            self.writeGeneratedReply(.osc_color, resp);
         }
     }
 
@@ -5514,6 +5547,52 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?117$p");
         try testing.expectEqualStrings("\x1B[?117;4$y", S.last_response.?);
     }
+}
+
+test "generated replies are ordered and retain write_pty fallback" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var kinds: [2]Handler.GeneratedReplyKind = undefined;
+        var replies: [2][32]u8 = undefined;
+        var lens: [2]usize = undefined;
+        var count: usize = 0;
+        var generic_count: usize = 0;
+
+        fn generated(_: *Handler, kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kinds[count] = kind;
+            @memcpy(replies[count][0..data.len], data);
+            lens[count] = data.len;
+            count += 1;
+        }
+        fn generic(_: *Handler, _: []const u8) void {
+            generic_count += 1;
+        }
+    };
+    S.count = 0;
+    S.generic_count = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.generic;
+    handler.effects.write_generated_reply = &S.generated;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Parser order is preserved across repeated replies. A restored terminal
+    // replaying the same bytes gets the same two logical receipts.
+    s.nextSlice("\x1B[5n\x1B[?7$p");
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(Handler.GeneratedReplyKind.device_status, S.kinds[0]);
+    try testing.expectEqual(Handler.GeneratedReplyKind.mode, S.kinds[1]);
+    try testing.expectEqualStrings("\x1B[0n", S.replies[0][0..S.lens[0]]);
+    try testing.expectEqualStrings("\x1B[?7;1$y", S.replies[1][0..S.lens[1]]);
+    try testing.expectEqual(@as(usize, 0), S.generic_count);
+
+    // No generated callback preserves the established generic callback.
+    s.handler.effects.write_generated_reply = null;
+    s.nextSlice("\x1B[5n");
+    try testing.expectEqual(@as(usize, 1), S.generic_count);
 }
 
 test "request mode DECRQM ANSI responses" {

@@ -277,13 +277,17 @@ pub const App = struct {
     }
 
     /// Create a new surface for the app.
-    fn newSurface(self: *App, opts: Surface.Options) !*Surface {
+    fn newSurface(
+        self: *App,
+        opts: Surface.Options,
+        reply_policy: Surface.ReplyPolicy,
+    ) !*Surface {
         // Grab a surface allocation because we're going to need it.
         var surface = try self.core_app.alloc.create(Surface);
         errdefer self.core_app.alloc.destroy(surface);
 
         // Create the surface
-        try surface.init(self, opts);
+        try surface.init(self, opts, reply_policy);
         errdefer surface.deinit();
 
         return surface;
@@ -490,6 +494,24 @@ pub const Surface = struct {
     /// Strings are borrowed from the caller; only the array is owned.
     command_argv_mem: ?[][:0]const u8 = null,
 
+    /// Kept outside Surface.Options so the established config ABI is frozen.
+    pub const ReplyPolicy = enum(c_int) {
+        normal = 0,
+        suppress_generated = 1,
+    };
+
+    fn replyPolicyFromC(raw: c_int) ?ReplyPolicy {
+        return std.enums.fromInt(ReplyPolicy, raw);
+    }
+
+    test "reply policy rejects invalid C values before surface initialization" {
+        const testing = std.testing;
+        try testing.expectEqual(ReplyPolicy.normal, replyPolicyFromC(0).?);
+        try testing.expectEqual(ReplyPolicy.suppress_generated, replyPolicyFromC(1).?);
+        try testing.expect(replyPolicyFromC(2) == null);
+        try testing.expect(replyPolicyFromC(-1) == null);
+    }
+
     /// Surface initialization options.
     pub const Options = extern struct {
         /// The platform that this surface is being initialized for and
@@ -571,7 +593,12 @@ pub const Surface = struct {
         try testing.expectEqual(@as(u32, 800), initialSize(.{}).width);
     }
 
-    pub fn init(self: *Surface, app: *App, opts: Options) !void {
+    pub fn init(
+        self: *Surface,
+        app: *App,
+        opts: Options,
+        reply_policy: ReplyPolicy,
+    ) !void {
         self.* = .{
             .app = app,
             .platform = try .init(opts.platform_tag, opts.platform),
@@ -706,6 +733,7 @@ pub const Surface = struct {
             app.core_app,
             app,
             self,
+            reply_policy == .suppress_generated,
         );
         errdefer self.core_surface.deinit();
         self.core_ready = true;
@@ -2025,7 +2053,20 @@ pub const CAPI = struct {
         app: *App,
         opts: *const apprt.Surface.Options,
     ) ?*Surface {
-        return surface_new_(app, opts) catch |err| {
+        return surface_new_(app, opts, .normal) catch |err| {
+            log.err("error initializing surface err={}", .{err});
+            return null;
+        };
+    }
+
+    /// Applies an immutable policy during construction, before termio starts.
+    export fn ghostty_surface_new_with_reply_policy(
+        app: *App,
+        opts: *const apprt.Surface.Options,
+        policy_raw: c_int,
+    ) ?*Surface {
+        const policy = Surface.replyPolicyFromC(policy_raw) orelse return null;
+        return surface_new_(app, opts, policy) catch |err| {
             log.err("error initializing surface err={}", .{err});
             return null;
         };
@@ -2034,8 +2075,9 @@ pub const CAPI = struct {
     fn surface_new_(
         app: *App,
         opts: *const apprt.Surface.Options,
+        reply_policy: Surface.ReplyPolicy,
     ) !*Surface {
-        return try app.newSurface(opts.*);
+        return try app.newSurface(opts.*, reply_policy);
     }
 
     export fn ghostty_surface_free(ptr: *Surface) void {

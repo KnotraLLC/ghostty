@@ -174,6 +174,9 @@ selection_scroll_active: bool = false,
 /// always enabled in this state.
 readonly: bool = false,
 
+/// Immutable reply policy selected by the embedding constructor.
+suppress_generated_replies: bool = false,
+
 /// Used to send notifications that long running commands have finished.
 /// Requires that shell integration be active. Should represent a nanosecond
 /// precision timestamp. It does not necessarily need to correspond to the
@@ -485,6 +488,7 @@ pub fn init(
     app: *App,
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
+    suppress_generated_replies: bool,
 ) !void {
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
@@ -638,6 +642,7 @@ pub fn init(
         .io_thr = undefined,
         .size = size,
         .config = derived_config,
+        .suppress_generated_replies = suppress_generated_replies,
 
         // Our conditional state is initialized to the app state. This
         // lets us get the most likely correct color theme and so on.
@@ -708,6 +713,7 @@ pub fn init(
             .renderer_wakeup = render_thread.wakeup,
             .renderer_mailbox = render_thread.mailbox,
             .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .suppress_generated_replies = suppress_generated_replies,
         });
     }
     // Outside the block, IO has now taken ownership of our temporary state
@@ -909,6 +915,20 @@ fn queueIo(
     self.io.queueMessage(msg, mutex);
 }
 
+/// Queue a delayed application-side response to a VT request. These responses
+/// bypass StreamHandler, so they must be fenced separately from user input.
+fn queueGeneratedReplyIo(
+    self: *Surface,
+    msg: termio.Message,
+    mutex: termio.Termio.MutexState,
+) void {
+    if (self.suppress_generated_replies) {
+        msg.deinit();
+        return;
+    }
+    self.queueIo(msg, mutex);
+}
+
 /// Forces the surface to render. This is useful for when the surface
 /// is in the middle of animation (such as a resize, etc.) or when
 /// the render timer is managed manually by the apprt.
@@ -1044,7 +1064,7 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             // We always use an allocating message because we don't know
             // the length of the title and this isn't a performance critical
             // path.
-            self.queueIo(.{
+            self.queueGeneratedReplyIo(.{
                 .write_alloc = .{
                     .alloc = self.alloc,
                     .data = data,
@@ -3464,7 +3484,7 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     const report_visibility = self.io.terminal.modes.get(.report_visibility);
     self.renderer_state.mutex.unlock(global.io());
     if (report_visibility) {
-        self.queueIo(.{ .visibility_report = .{
+        self.queueGeneratedReplyIo(.{ .visibility_report = .{
             .visible = visible,
             .force = false,
         } }, .unlocked);
@@ -5078,7 +5098,7 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
     self.notifyConfigConditionalState();
 
     // If mode 2031 is on, then we report the change live.
-    self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
+    self.queueGeneratedReplyIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
@@ -6626,7 +6646,7 @@ fn completeClipboardReadOSC52(
     const encoded = enc.encode(buf[prefix.len..], data);
     assert(encoded.len == size);
 
-    self.queueIo(.{ .write_alloc = .{
+    self.queueGeneratedReplyIo(.{ .write_alloc = .{
         .alloc = self.alloc,
         .data = buf,
     } }, .unlocked);
@@ -6737,7 +6757,7 @@ fn kittyClipboardStatus(
         .terminator = terminator,
     }).encode(&aw.writer);
 
-    self.queueIo(.{ .write_alloc = .{
+    self.queueGeneratedReplyIo(.{ .write_alloc = .{
         .alloc = self.alloc,
         .data = try aw.toOwnedSlice(),
     } }, .unlocked);
@@ -6793,7 +6813,7 @@ fn completeKittyClipboardRead(
         .terminator = req.terminator,
     }).encode(&aw.writer);
 
-    self.queueIo(.{ .write_alloc = .{
+    self.queueGeneratedReplyIo(.{ .write_alloc = .{
         .alloc = self.alloc,
         .data = try aw.toOwnedSlice(),
     } }, .unlocked);

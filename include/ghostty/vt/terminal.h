@@ -1902,6 +1902,31 @@ typedef void (*GhosttyTerminalWritePtyFn)(GhosttyTerminal terminal,
                                           const uint8_t* data,
                                           size_t len);
 
+/** Parser-originated reply classification. Values are append-only. */
+typedef enum GHOSTTY_ENUM_TYPED {
+  GHOSTTY_TERMINAL_GENERATED_REPLY_DEVICE_STATUS,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_DEVICE_ATTRIBUTES,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_MODE,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_DECRQSS,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_XTGETTCAP,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_XTVERSION,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_ENQUIRY,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_OSC_COLOR,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_KITTY_KEYBOARD,
+  GHOSTTY_TERMINAL_GENERATED_REPLY_SIZE,
+} GhosttyTerminalGeneratedReplyKind;
+
+/**
+ * Called synchronously for a parser-originated terminal-protocol reply.
+ * This callback is distinct from write_pty: it never reports embedder input
+ * such as keyboard or paste. When unset, replies retain write_pty behavior.
+ */
+typedef void (*GhosttyTerminalGeneratedReplyFn)(GhosttyTerminal terminal,
+                                                void* userdata,
+                                                GhosttyTerminalGeneratedReplyKind kind,
+                                                const uint8_t* data,
+                                                size_t len);
+
 /**
  * Callback function type for XTVERSION.
  *
@@ -1962,6 +1987,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: GhosttyTerminalWritePtyFn
    */
   GHOSTTY_TERMINAL_OPT_WRITE_PTY = 1,
+
+  /**
+   * Callback for parser-originated replies. When set it receives classified
+   * replies synchronously in parser order; write_pty remains the default
+   * when this option is NULL.
+   * Input type: GhosttyTerminalGeneratedReplyFn
+   */
+  GHOSTTY_TERMINAL_OPT_GENERATED_REPLY = 48,
 
   /**
    * Callback invoked when the terminal receives a BEL character

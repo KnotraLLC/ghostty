@@ -340,6 +340,7 @@ pub const ModeConfig = extern struct {
 const Effects = struct {
     userdata: ?*anyopaque = null,
     write_pty: ?WritePtyFn = null,
+    generated_reply: ?GeneratedReplyFn = null,
     bell: ?BellFn = null,
     color_scheme: ?ColorSchemeFn = null,
     desktop_notification: ?DesktopNotificationFn = null,
@@ -368,6 +369,7 @@ const Effects = struct {
 
     /// C function pointer type for the write_pty callback.
     pub const WritePtyFn = *const fn (Terminal, ?*anyopaque, [*]const u8, usize) callconv(lib.calling_conv) void;
+    pub const GeneratedReplyFn = *const fn (Terminal, ?*anyopaque, Handler.GeneratedReplyKind, [*]const u8, usize) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the bell callback.
     pub const BellFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -471,6 +473,15 @@ const Effects = struct {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.write_pty orelse return;
         func(@ptrCast(wrapper), wrapper.effects.userdata, data.ptr, data.len);
+    }
+
+    fn generatedReplyTrampoline(handler: *Handler, kind: Handler.GeneratedReplyKind, data: []const u8) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        if (wrapper.effects.generated_reply) |func| {
+            func(@ptrCast(wrapper), wrapper.effects.userdata, kind, data.ptr, data.len);
+            return;
+        }
+        writePtyTrampoline(handler, data);
     }
 
     fn bellTrampoline(handler: *Handler) void {
@@ -858,6 +869,7 @@ fn wrap(
     var handler: Stream.Handler = t.vtHandler();
     handler.effects = .{
         .write_pty = &Effects.writePtyTrampoline,
+        .write_generated_reply = &Effects.generatedReplyTrampoline,
         .bell = &Effects.bellTrampoline,
         .color_scheme = &Effects.colorSchemeTrampoline,
         .desktop_notification = &Effects.desktopNotificationTrampoline,
@@ -1382,12 +1394,14 @@ pub const Option = enum(c_int) {
     xt_checksum_extension = 45,
     program_status = 46,
     resize_window = 47,
+    generated_reply = 48,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
         return switch (self) {
             .userdata => ?*const anyopaque,
             .write_pty => ?Effects.WritePtyFn,
+            .generated_reply => ?Effects.GeneratedReplyFn,
             .bell => ?Effects.BellFn,
             .color_scheme => ?Effects.ColorSchemeFn,
             .desktop_notification => ?Effects.DesktopNotificationFn,
@@ -1466,6 +1480,7 @@ fn setTyped(
     switch (option) {
         .userdata => wrapper.effects.userdata = @constCast(value),
         .write_pty => wrapper.effects.write_pty = value,
+        .generated_reply => wrapper.effects.generated_reply = value,
         .bell => wrapper.effects.bell = value,
         .color_scheme => wrapper.effects.color_scheme = value,
         .desktop_notification => wrapper.effects.desktop_notification = value,

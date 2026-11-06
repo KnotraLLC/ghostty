@@ -60,6 +60,9 @@ pub const StreamHandler = struct {
     /// and XTCHECKSUM may change how it's calculated.
     xt_checksum_report: bool,
 
+    /// Set before termio starts; no runtime setter intentionally exists.
+    suppress_generated_replies: bool = false,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -190,6 +193,22 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        if (self.suppress_generated_replies) switch (msg) {
+            // StreamHandler is fed only by parser actions. These are every
+            // route by which a parser reply reaches PTY I/O, including the
+            // delayed surface-derived size/color/visibility reports.
+            .write_small,
+            .write_stable,
+            .write_alloc,
+            .size_report,
+            .color_scheme_report,
+            .visibility_report,
+            => {
+                msg.deinit();
+                return;
+            },
+            else => {},
+        };
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
@@ -2012,6 +2031,46 @@ test "kitty clipboard read: targets-only never consumes a one-time grant" {
     // ...so the follow-up data read is still granted, exactly once.
     try testing.expect(handler.kittyClipboardReadGranted("otp", 1));
     try testing.expect(!handler.kittyClipboardReadGranted("otp", 1));
+}
+
+test "generated reply suppression drops replies but preserves non-reply mailbox work" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+    var renderer_state: renderer.State = .{ .mutex = &mutex, .terminal = undefined };
+    var handler: StreamHandler = undefined;
+    handler.termio_mailbox = &mailbox;
+    handler.renderer_state = &renderer_state;
+    handler.suppress_generated_replies = true;
+    handler.termio_messaged = false;
+
+    // Generated protocol response does not enter PTY I/O.
+    handler.messageWriter(.{ .write_stable = "\x1b[0n" });
+    try testing.expect(!handler.termio_messaged);
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+
+    // Input-side/control messages are deliberately not classified as a
+    // generated response, preserving independent keyboard/paste paths.
+    handler.messageWriter(.{ .linefeed_mode = true });
+    const msg = mailbox.spsc.queue.pop(global.io()) orelse return error.TestUnexpectedResult;
+    defer msg.deinit();
+    try testing.expectEqual(@as(termio.Message, .{ .linefeed_mode = true }), msg);
+
+    // The normal policy is byte-for-byte the historical queueing behavior.
+    handler.suppress_generated_replies = false;
+    handler.termio_messaged = false;
+    handler.messageWriter(.{ .write_stable = "\x1b[0n" });
+    const normal = mailbox.spsc.queue.pop(global.io()) orelse return error.TestUnexpectedResult;
+    defer normal.deinit();
+    switch (normal) {
+        .write_stable => |bytes| try testing.expectEqualStrings("\x1b[0n", bytes),
+        else => try testing.expect(false),
+    }
+    try testing.expect(handler.termio_messaged);
 }
 
 test "kitty clipboard write: oversized text replies EFBIG" {
