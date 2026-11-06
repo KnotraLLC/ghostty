@@ -194,6 +194,7 @@ pub const terminal_compression_activity = terminal.compression_activity;
 pub const terminal_compress = terminal.compress;
 pub const terminal_get = terminal.get;
 pub const terminal_get_multi = terminal.get_multi;
+pub const terminal_snapshot_omitted_state = terminal.snapshot_omitted_state;
 pub const terminal_continuation_write = terminal.continuation_write;
 pub const terminal_continuation_buf = terminal.continuation_buf;
 pub const terminal_continuation_alloc = terminal.continuation_alloc;

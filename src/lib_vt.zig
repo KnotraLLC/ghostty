@@ -331,6 +331,7 @@ comptime {
         @export(&c.terminal_compress, .{ .name = "ghostty_terminal_compress" });
         @export(&c.terminal_get, .{ .name = "ghostty_terminal_get" });
         @export(&c.terminal_get_multi, .{ .name = "ghostty_terminal_get_multi" });
+        @export(&c.terminal_snapshot_omitted_state, .{ .name = "ghostty_terminal_snapshot_omitted_state" });
         @export(&c.terminal_continuation_write, .{ .name = "ghostty_terminal_continuation_write" });
         @export(&c.terminal_continuation_buf, .{ .name = "ghostty_terminal_continuation_buf" });
         @export(&c.terminal_continuation_alloc, .{ .name = "ghostty_terminal_continuation_alloc" });

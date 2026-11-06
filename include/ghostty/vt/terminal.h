@@ -3372,6 +3372,26 @@ GHOSTTY_API GhosttyResult ghostty_terminal_get(GhosttyTerminal terminal,
                                     void *out);
 
 /**
+ * Report whether bounded, known terminal state would be omitted by the
+ * current snapshot encoder and VT formatter.
+ *
+ * This detects nonempty Kitty image registries or placements, in-progress
+ * Kitty image loading, registered glyph glossary entries, and Kitty drag and
+ * drop registration on either initialized screen. It does not expose payload
+ * or registry contents, and it does not claim exhaustive state-parity
+ * coverage for snapshots or formatting. The check is constant time.
+ *
+ * @param terminal The terminal handle (NULL is invalid)
+ * @param[out] out Receives whether any known omitted state is present (NULL is invalid)
+ * @return GHOSTTY_SUCCESS on success, or GHOSTTY_INVALID_VALUE if an argument is NULL
+ *
+ * @ingroup terminal
+ */
+GHOSTTY_API GhosttyResult ghostty_terminal_snapshot_omitted_state(
+    GhosttyTerminal terminal,
+    bool* out);
+
+/**
  * Get multiple data fields from a terminal in a single call.
  *
  * This is an optimization over calling ghostty_terminal_get()

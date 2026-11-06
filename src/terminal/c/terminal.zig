@@ -1781,6 +1781,45 @@ pub fn reset(terminal_: Terminal) callconv(lib.calling_conv) void {
     if (sync) Effects.renderHoldTrampoline(&wrapper.stream.handler, false);
 }
 
+/// Reports whether terminal state from the bounded, known protocol families
+/// below would be omitted by the current snapshot encoder and VT formatter.
+///
+/// This deliberately exposes no image, glyph, or drag-and-drop payloads. It
+/// is not a claim that those encoders preserve every possible terminal state.
+pub fn snapshot_omitted_state(
+    terminal_: Terminal,
+    out: ?*bool,
+) callconv(lib.calling_conv) Result {
+    const wrapper = terminal_ orelse return .invalid_value;
+    const result = out orelse return .invalid_value;
+    const t = wrapper.terminal;
+
+    if (comptime build_options.kitty_graphics) {
+        const omittedByImages = struct {
+            fn check(screen: *const Screen) bool {
+                const images = &screen.kitty_images;
+                return images.placements.count() != 0 or
+                    images.images.count() != 0 or
+                    images.loading != null;
+            }
+        }.check;
+
+        if (omittedByImages(t.screens.get(.primary).?)) {
+            result.* = true;
+            return .success;
+        }
+        if (t.screens.get(.alternate)) |screen| {
+            if (omittedByImages(screen)) {
+                result.* = true;
+                return .success;
+            }
+        }
+    }
+
+    result.* = t.glyph_glossary.entries.count() != 0 or t.kitty_dnd != null;
+    return .success;
+}
+
 /// C: GhosttyKittyGraphics
 pub const KittyGraphics = kitty_gfx_c.KittyGraphics;
 
@@ -7397,6 +7436,161 @@ test "set glyph protocol disables APC handling and clears glossary" {
     try testing.expectEqual(Result.success, set(t, .glyph_protocol, @ptrCast(&enabled)));
     vt_write(t, register, register.len);
     try testing.expect(t.?.terminal.glyph_glossary.contains(0xE0A0));
+}
+
+test "snapshot omitted state rejects invalid arguments and is false fresh" {
+    var omitted = true;
+    try testing.expectEqual(Result.invalid_value, snapshot_omitted_state(null, &omitted));
+
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    try testing.expectEqual(Result.invalid_value, snapshot_omitted_state(t, null));
+    try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+    try testing.expect(!omitted);
+}
+
+test "snapshot omitted state detects kitty graphics registries on either screen" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    // A zero-byte, unplaced image has no memory-usage signal but is still
+    // omitted state. Reset clears the storage through its native owner.
+    {
+        var t: Terminal = null;
+        try testing.expectEqual(Result.success, new(
+            &lib.alloc.test_allocator,
+            &t,
+            80,
+            24,
+        ));
+        defer free(t);
+
+        const screen = t.?.terminal.screens.active;
+        try screen.kitty_images.addImage(screen.io, screen.alloc, screen, .{ .id = 1 });
+        try testing.expectEqual(@as(usize, 0), screen.kitty_images.total_bytes);
+        try testing.expectEqual(@as(usize, 0), screen.kitty_images.placements.count());
+
+        var omitted = false;
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(omitted);
+
+        reset(t);
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(!omitted);
+    }
+
+    // Placements are retained separately from their pixels and must count.
+    {
+        var t: Terminal = null;
+        try testing.expectEqual(Result.success, new(
+            &lib.alloc.test_allocator,
+            &t,
+            80,
+            24,
+        ));
+        defer free(t);
+
+        const screen = t.?.terminal.screens.active;
+        try screen.kitty_images.addImage(screen.io, screen.alloc, screen, .{ .id = 1 });
+        try screen.kitty_images.addPlacement(screen.io, screen.alloc, screen, 1, 1, .{
+            .location = .{ .virtual = {} },
+        });
+        try testing.expectEqual(@as(usize, 1), screen.kitty_images.placements.count());
+
+        var omitted = false;
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(omitted);
+    }
+
+    // The inactive alternate screen is inspected too.
+    {
+        var t: Terminal = null;
+        try testing.expectEqual(Result.success, new(
+            &lib.alloc.test_allocator,
+            &t,
+            80,
+            24,
+        ));
+        defer free(t);
+
+        vt_write(t, "\x1b[?1049h", 8);
+        const alternate = t.?.terminal.screens.active;
+        try alternate.kitty_images.addImage(alternate.io, alternate.alloc, alternate, .{ .id = 1 });
+        vt_write(t, "\x1b[?1049l", 8);
+        try testing.expectEqual(ScreenSet.Key.primary, t.?.terminal.screens.active_key);
+        try testing.expectEqual(@as(usize, 0), t.?.terminal.screens.active.kitty_images.images.count());
+        try testing.expectEqual(@as(usize, 1), alternate.kitty_images.images.count());
+
+        var omitted = false;
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(omitted);
+    }
+
+    // An unfinished parser-owned transmission has no completed image yet.
+    {
+        var t: Terminal = null;
+        try testing.expectEqual(Result.success, new(
+            &lib.alloc.test_allocator,
+            &t,
+            80,
+            24,
+        ));
+        defer free(t);
+
+        const begin = "\x1b_Ga=t,t=d,f=24,i=1,s=1,v=2,m=1;AAAA\x1b\\";
+        vt_write(t, begin.ptr, begin.len);
+        try testing.expect(t.?.terminal.screens.active.kitty_images.loading != null);
+        try testing.expectEqual(@as(usize, 0), t.?.terminal.screens.active.kitty_images.images.count());
+        try testing.expectEqual(@as(usize, 0), t.?.terminal.screens.active.kitty_images.placements.count());
+
+        var omitted = false;
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(omitted);
+    }
+}
+
+test "snapshot omitted state detects glyph glossary and kitty dnd registration" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    var omitted = false;
+
+    if (comptime build_options.glyph_protocol) {
+        const register = "\x1B_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1B\\";
+        vt_write(t, register.ptr, register.len);
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(omitted);
+
+        // Terminal reset clears the native glossary owner.
+        reset(t);
+        try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+        try testing.expect(!omitted);
+    }
+
+    const register_dnd = "\x1B]72;t=a;text/plain\x1B\\";
+    vt_write(t, register_dnd.ptr, register_dnd.len);
+    try testing.expect(t.?.terminal.kitty_dnd != null);
+    try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+    try testing.expect(omitted);
+
+    // Kitty's unregister command releases the registration state.
+    const unregister_dnd = "\x1B]72;t=A\x1B\\";
+    vt_write(t, unregister_dnd.ptr, unregister_dnd.len);
+    try testing.expect(t.?.terminal.kitty_dnd == null);
+    try testing.expectEqual(Result.success, snapshot_omitted_state(t, &omitted));
+    try testing.expect(!omitted);
 }
 
 test "get_multi success" {
