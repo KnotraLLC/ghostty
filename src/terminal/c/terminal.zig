@@ -1756,10 +1756,14 @@ pub fn resize(
     cell_height_px: u32,
 ) callconv(lib.calling_conv) Result {
     const wrapper = terminal_ orelse return .invalid_value;
+    // A zero pair is the C API's explicit "pixel geometry unknown" value.
+    // Do not accept partial geometry: neither dimension is useful alone.
+    if ((cell_width_px == 0) != (cell_height_px == 0)) return .invalid_value;
+
     wrapper.stream.handler.resize(.{
         .cols = cols,
         .rows = rows,
-        .cell_size_px = .{
+        .cell_size_px = if (cell_width_px == 0) null else .{
             .width = cell_width_px,
             .height = cell_height_px,
         },
@@ -7114,6 +7118,124 @@ test "resize sends in-band size report" {
     // height_px = 40*18 = 720, width_px = 100*9 = 900
     try testing.expect(S.last_data != null);
     try testing.expectEqualStrings("\x1B[48;40;100;720;900t", S.last_data.?);
+}
+
+test "resize treats zero pixel dimensions as unknown geometry" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var calls: usize = 0;
+        var kind: ?GeneratedReplyKind = null;
+        var data: [128]u8 = undefined;
+        var len: usize = 0;
+
+        fn generated(
+            _: Terminal,
+            _: ?*anyopaque,
+            reply_kind: GeneratedReplyKind,
+            ptr: [*]const u8,
+            data_len: usize,
+        ) callconv(lib.calling_conv) void {
+            calls += 1;
+            kind = reply_kind;
+            @memcpy(data[0..data_len], ptr[0..data_len]);
+            len = data_len;
+        }
+    };
+    S.calls = 0;
+    S.kind = null;
+    S.len = 0;
+
+    try testing.expectEqual(Result.success, set(t, .generated_reply, @ptrCast(&S.generated)));
+    t.?.terminal.modes.set(.in_band_size_reports, true);
+
+    // Fresh unknown geometry must not manufacture a zero-pixel report.
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 0, 0));
+    try testing.expectEqual(@as(usize, 0), S.calls);
+    try testing.expectEqual(@as(u32, 0), t.?.terminal.width_px);
+    try testing.expectEqual(@as(u32, 0), t.?.terminal.height_px);
+
+    // Known geometry reports exactly once through the typed callback.
+    try testing.expectEqual(Result.success, resize(t, 100, 40, 9, 18));
+    try testing.expectEqual(@as(usize, 1), S.calls);
+    try testing.expectEqual(GeneratedReplyKind.size, S.kind.?);
+    try testing.expectEqualStrings("\x1B[48;40;100;720;900t", S.data[0..S.len]);
+
+    // Returning to unknown geometry clears stale pixels and emits nothing.
+    try testing.expectEqual(Result.success, resize(t, 100, 40, 0, 0));
+    try testing.expectEqual(@as(usize, 1), S.calls);
+    try testing.expectEqual(@as(u32, 0), t.?.terminal.width_px);
+    try testing.expectEqual(@as(u32, 0), t.?.terminal.height_px);
+}
+
+test "resize clears unknown geometry before releasing render hold" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var calls: usize = 0;
+        var width_px: u32 = undefined;
+        var height_px: u32 = undefined;
+
+        fn held(terminal: Terminal, _: ?*anyopaque, held_: bool) callconv(lib.calling_conv) void {
+            if (held_) return;
+            calls += 1;
+            width_px = terminal.?.terminal.width_px;
+            height_px = terminal.?.terminal.height_px;
+        }
+    };
+    S.calls = 0;
+
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 9, 18));
+    try testing.expectEqual(Result.success, set(t, .render_hold, @ptrCast(&S.held)));
+    t.?.terminal.modes.set(.synchronized_output, true);
+
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 0, 0));
+    try testing.expectEqual(@as(usize, 1), S.calls);
+    try testing.expectEqual(@as(u32, 0), S.width_px);
+    try testing.expectEqual(@as(u32, 0), S.height_px);
+}
+
+test "resize rejects partial pixel geometry before side effects" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 9, 18));
+    const zt = t.?.terminal;
+    zt.modes.set(.synchronized_output, true);
+
+    try testing.expectEqual(Result.invalid_value, resize(t, 79, 23, 0, 18));
+    try testing.expectEqual(80, zt.cols);
+    try testing.expectEqual(24, zt.rows);
+    try testing.expectEqual(@as(u32, 720), zt.width_px);
+    try testing.expectEqual(@as(u32, 432), zt.height_px);
+    try testing.expect(zt.modes.get(.synchronized_output));
+
+    try testing.expectEqual(Result.invalid_value, resize(t, 79, 23, 9, 0));
+    try testing.expectEqual(80, zt.cols);
+    try testing.expectEqual(24, zt.rows);
+    try testing.expectEqual(@as(u32, 720), zt.width_px);
+    try testing.expectEqual(@as(u32, 432), zt.height_px);
+    try testing.expect(zt.modes.get(.synchronized_output));
 }
 
 test "resize no size report without mode 2048" {

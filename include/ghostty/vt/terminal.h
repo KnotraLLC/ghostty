@@ -3080,7 +3080,10 @@ GHOSTTY_API void ghostty_terminal_reset(GhosttyTerminal terminal);
  * This also updates the terminal's pixel dimensions (used for image
  * protocols and size reports), disables synchronized output mode (allowed
  * by the spec so that resize results are shown immediately), and sends an
- * in-band size report if mode 2048 is enabled.
+ * in-band size report if mode 2048 is enabled. Pass zero for both pixel
+ * dimensions when geometry is unknown; this clears any prior pixel geometry
+ * and suppresses the in-band size report. Passing zero for only one pixel
+ * dimension is invalid.
  *
  * If synchronized output was enabled, the GHOSTTY_TERMINAL_OPT_RENDER_HOLD
  * callback is invoked to report that the hold ended.
@@ -3088,8 +3091,10 @@ GHOSTTY_API void ghostty_terminal_reset(GhosttyTerminal terminal);
  * @param terminal The terminal handle (NULL returns GHOSTTY_INVALID_VALUE)
  * @param cols New width in cells (must be greater than zero)
  * @param rows New height in cells (must be greater than zero)
- * @param cell_width_px Width of a single cell in pixels
- * @param cell_height_px Height of a single cell in pixels
+ * @param cell_width_px Width of a single cell in pixels, or zero when both
+ *                      pixel dimensions are unknown
+ * @param cell_height_px Height of a single cell in pixels, or zero when both
+ *                       pixel dimensions are unknown
  * @return GHOSTTY_SUCCESS on success, or an error code on failure
  *
  * @ingroup terminal

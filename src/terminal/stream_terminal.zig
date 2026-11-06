@@ -539,10 +539,18 @@ pub const Handler = struct {
         // Resize always turns off synchronized output, ending its hold.
         const sync = self.terminal.modes.get(.synchronized_output);
         try self.terminal.resize(self.terminal.gpa(), value);
-        if (sync) self.renderHold(false);
 
         // Mode 2048 reports require complete, current cell pixel geometry.
-        const cell_size = value.cell_size_px orelse return;
+        // A successful resize with unknown geometry also invalidates an older
+        // known value, so image and report consumers cannot reuse stale pixels.
+        const cell_size = value.cell_size_px orelse {
+            self.terminal.width_px = 0;
+            self.terminal.height_px = 0;
+            if (sync) self.renderHold(false);
+            return;
+        };
+
+        if (sync) self.renderHold(false);
 
         // If we have no in-band size reports enabled then do nothing.
         if (!self.terminal.modes.get(.in_band_size_reports)) return;
@@ -2684,6 +2692,8 @@ test "resize suppresses mode 2048 reports" {
     t.modes.set(.in_band_size_reports, true);
     try s.handler.resize(.{ .cols = 80, .rows = 24 });
     try testing.expectEqual(@as(usize, 0), S.calls);
+    try testing.expectEqual(@as(u32, 0), t.width_px);
+    try testing.expectEqual(@as(u32, 0), t.height_px);
 
     // A read-only stream has no write effect and remains successful.
     var readonly_terminal: Terminal = try .init(
@@ -2726,6 +2736,8 @@ test "resize failure preserves terminal state and does not write" {
     var s: Stream = .init(.{ .allocator = alloc, .handler = handler });
     defer s.deinit();
 
+    t.width_px = 90;
+    t.height_px = 50;
     t.modes.set(.synchronized_output, true);
     t.modes.set(.in_band_size_reports, true);
     failing.fail_index = failing.alloc_index;
@@ -2738,8 +2750,8 @@ test "resize failure preserves terminal state and does not write" {
     try testing.expect(t.modes.get(.synchronized_output));
     try testing.expect(!S.called);
     try testing.expectEqual(@as(@TypeOf(t.cols), 10), t.cols);
-    try testing.expectEqual(@as(u32, 0), t.width_px);
-    try testing.expectEqual(@as(u32, 0), t.height_px);
+    try testing.expectEqual(@as(u32, 90), t.width_px);
+    try testing.expectEqual(@as(u32, 50), t.height_px);
 }
 
 test "resize effects do not change canonical terminal state" {
