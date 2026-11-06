@@ -182,6 +182,7 @@ pub const sys_log_stderr = sys.logStderr;
 pub const sys_set = sys.set;
 
 pub const terminal_new = terminal.new;
+pub const terminal_generated_reply_abi_version = terminal.generated_reply_abi_version;
 pub const terminal_free = terminal.free;
 pub const terminal_reset = terminal.reset;
 pub const terminal_resize = terminal.resize;

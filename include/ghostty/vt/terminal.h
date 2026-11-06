@@ -3002,6 +3002,18 @@ typedef enum GHOSTTY_ENUM_TYPED {
 } GhosttyTerminalData;
 
 /**
+ * Version of the classified parser-generated-reply callback ABI.
+ *
+ * Embedders that use GHOSTTY_TERMINAL_OPT_GENERATED_REPLY must require the
+ * exact version they implement before installing the callback. This symbol is
+ * intentionally required at link time so archives without that ABI fail
+ * closed rather than accepting an unrecognized option layout.
+ *
+ * @ingroup terminal
+ */
+GHOSTTY_API uint32_t ghostty_terminal_generated_reply_abi_version(void);
+
+/**
  * Create a new terminal instance.
  *
  * The terminal starts with various reasonable defaults e.g. around

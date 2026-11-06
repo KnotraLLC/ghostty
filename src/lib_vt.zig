@@ -319,6 +319,7 @@ comptime {
             @export(&c.render_state_free, .{ .name = "ghostty_render_state_free" });
         }
         @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
+        @export(&c.terminal_generated_reply_abi_version, .{ .name = "ghostty_terminal_generated_reply_abi_version" });
         @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
         @export(&c.terminal_reset, .{ .name = "ghostty_terminal_reset" });
         @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });

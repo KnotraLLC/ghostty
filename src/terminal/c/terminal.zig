@@ -47,6 +47,15 @@ const log = std.log.scoped(.terminal_c);
 /// opts in through `GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES`.
 pub const default_continuation_max_bytes: usize = 0;
 
+/// Version of the classified generated-reply callback ABI.
+///
+/// Embedders must check this before setting `.generated_reply`; linking is
+/// deliberately required so an archive without the callback contract fails
+/// closed instead of interpreting option 48 against an older ABI.
+pub fn generated_reply_abi_version() callconv(lib.calling_conv) u32 {
+    return 1;
+}
+
 /// Owns the `std.Io` implementation retained by every C terminal.
 ///
 /// Snapshot decoding creates this before the native terminal exists and
@@ -6932,6 +6941,10 @@ test "checksum extension survives resets" {
 
     const invalid: u8 = 32;
     try testing.expectEqual(Result.invalid_value, set(t, .xt_checksum_extension, &invalid));
+}
+
+test "generated reply ABI version is stable" {
+    try testing.expectEqual(@as(u32, 1), generated_reply_abi_version());
 }
 
 test "resize updates pixel dimensions" {
