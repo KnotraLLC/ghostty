@@ -194,9 +194,9 @@ pub const StreamHandler = struct {
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
         if (self.suppress_generated_replies) switch (msg) {
-            // StreamHandler is fed only by parser actions. These are every
-            // route by which a parser reply reaches PTY I/O, including the
-            // delayed surface-derived size/color/visibility reports.
+            // StreamHandler is fed only by parser actions. Surface-derived
+            // size/color/visibility reports fence themselves at their direct
+            // Termio sinks because they bypass this mailbox writer.
             .write_small,
             .write_stable,
             .write_alloc,

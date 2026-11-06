@@ -581,6 +581,11 @@ pub fn sizeReport(self: *Termio, td: *ThreadData, style: termio.Message.SizeRepo
 }
 
 fn sizeReportLocked(self: *Termio, td: *ThreadData, style: termio.Message.SizeReport) !void {
+    // A mode-2048 resize report is generated from the accepted surface size,
+    // not from StreamHandler. It must consult that handler's immutable policy
+    // before it reaches the backend's PTY writer.
+    if (self.terminal_stream.handler.suppress_generated_replies) return;
+
     const grid_size = self.size.grid();
     const report_size: terminalpkg.size_report.Size = .{
         .rows = grid_size.rows,
@@ -793,6 +798,7 @@ pub fn colorSchemeReport(self: *Termio, td: *ThreadData, force: bool) !void {
 }
 
 pub fn colorSchemeReportLocked(self: *Termio, td: *ThreadData, force: bool) !void {
+    if (self.terminal_stream.handler.suppress_generated_replies) return;
     if (!force and !self.renderer_state.terminal.modes.get(.report_color_scheme)) {
         return;
     }
@@ -815,6 +821,8 @@ pub fn visibilityReport(
     visible: bool,
     force: bool,
 ) !void {
+    if (self.terminal_stream.handler.suppress_generated_replies) return;
+
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
 
@@ -873,6 +881,19 @@ pub const ThreadData = struct {
         self.stream_handler.queueSurfaceMessage(msg);
     }
 };
+
+test "suppressed direct report sinks never reach the PTY writer" {
+    // The guard must precede every access to terminal, renderer, or backend
+    // state. Leaving those fields undefined makes a future bypass fail this
+    // focused regression instead of silently enqueuing a generated reply.
+    var io: Termio = undefined;
+    io.terminal_stream.handler.suppress_generated_replies = true;
+    var td: ThreadData = undefined;
+
+    try io.sizeReportLocked(&td, .mode_2048);
+    try io.colorSchemeReportLocked(&td, true);
+    try io.visibilityReport(&td, true, true);
+}
 
 /// Get information about the process(es) attached to the backend. Returns
 /// `null` if there was an error getting the information or the information is
