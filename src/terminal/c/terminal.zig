@@ -53,7 +53,7 @@ pub const default_continuation_max_bytes: usize = 0;
 /// deliberately required so an archive without the callback contract fails
 /// closed instead of interpreting option 48 against an older ABI.
 pub fn generated_reply_abi_version() callconv(lib.calling_conv) u32 {
-    return 1;
+    return 2;
 }
 
 /// Owns the `std.Io` implementation retained by every C terminal.
@@ -4570,6 +4570,42 @@ test "set write_pty callback DECRQM" {
     try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
 }
 
+test "generated reply callback receives classified DECRQM" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var kind: ?GeneratedReplyKind = null;
+        var data: [32]u8 = undefined;
+        var len: usize = 0;
+
+        fn generated(
+            _: Terminal,
+            _: ?*anyopaque,
+            reply_kind: GeneratedReplyKind,
+            ptr: [*]const u8,
+            data_len: usize,
+        ) callconv(lib.calling_conv) void {
+            kind = reply_kind;
+            @memcpy(data[0..data_len], ptr[0..data_len]);
+            len = data_len;
+        }
+    };
+    S.kind = null;
+    S.len = 0;
+
+    try testing.expectEqual(Result.success, set(t, .generated_reply, @ptrCast(&S.generated)));
+    vt_write(t, "\x1B[?7$p", 6);
+    try testing.expectEqual(GeneratedReplyKind.mode, S.kind.?);
+    try testing.expectEqualStrings("\x1B[?7;1$y", S.data[0..S.len]);
+}
+
 test "write_pty receives DECRQSS response" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
@@ -6947,7 +6983,7 @@ test "checksum extension survives resets" {
 }
 
 test "generated reply ABI version is stable" {
-    try testing.expectEqual(@as(u32, 1), generated_reply_abi_version());
+    try testing.expectEqual(@as(u32, 2), generated_reply_abi_version());
 }
 
 test "resize updates pixel dimensions" {

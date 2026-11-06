@@ -1074,6 +1074,13 @@ test "manifest uses public enum names" {
     const generated_values = generated_reply.get("values").?.object;
     try std.testing.expectEqual(@as(i64, 0), generated_values.get("DEVICE_STATUS").?.integer);
     try std.testing.expectEqual(@as(i64, 9), generated_values.get("SIZE").?.integer);
+    try std.testing.expectEqual(@as(i64, 10), generated_values.get("PROGRAM_STATUS").?.integer);
+    try std.testing.expectEqual(@as(i64, 11), generated_values.get("OSC_CLIPBOARD").?.integer);
+    try std.testing.expectEqual(@as(i64, 12), generated_values.get("KITTY_CLIPBOARD").?.integer);
+    try std.testing.expectEqual(@as(i64, 13), generated_values.get("KITTY_DND").?.integer);
+    try std.testing.expectEqual(@as(i64, 14), generated_values.get("XT_CHECKSUM").?.integer);
+    try std.testing.expectEqual(@as(i64, 15), generated_values.get("KITTY_GRAPHICS").?.integer);
+    try std.testing.expectEqual(@as(i64, 16), generated_values.get("GLYPH").?.integer);
     try std.testing.expectEqual(@as(i64, std.math.maxInt(c_int)), generated_values.get("MAX_VALUE").?.integer);
 
     const semantic_prompt_values = manifest_types.get("GhosttySemanticPromptKind").?.object.get("values").?.object;

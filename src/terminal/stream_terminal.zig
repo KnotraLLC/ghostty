@@ -364,6 +364,13 @@ pub const Handler = struct {
         osc_color,
         kitty_keyboard,
         size,
+        program_status,
+        osc_clipboard,
+        kitty_clipboard,
+        kitty_dnd,
+        xt_checksum,
+        kitty_graphics,
+        glyph,
     };
 
     /// A sequence this library does not implement, passed to the
@@ -540,8 +547,7 @@ pub const Handler = struct {
         // If we have no in-band size reports enabled then do nothing.
         if (!self.terminal.modes.get(.in_band_size_reports)) return;
 
-        // If we have no write_pty effect, do nothing.
-        const write_pty = self.effects.write_pty orelse return;
+        if (!self.canWriteGeneratedReply()) return;
 
         // The maximum mode-2048 response is covered by size_report's maximum
         // value test. Reserve the final byte for the callback's sentinel.
@@ -554,7 +560,7 @@ pub const Handler = struct {
             .cell_height = cell_size.height,
         }) catch unreachable;
         buf[writer.end] = 0;
-        write_pty(self, buf[0..writer.end :0]);
+        self.writeGeneratedReply(.size, buf[0..writer.end :0]);
     }
 
     /// A paste request; see `paste`.
@@ -1005,7 +1011,8 @@ pub const Handler = struct {
             // sending report contents back to the program.
             .query => |terminator| if (self.effects.program_status != null) {
                 switch (terminator) {
-                    inline else => |t| self.writePty(
+                    inline else => |t| self.writeGeneratedReply(
+                        .program_status,
                         "\x1b]7501;" ++
                             osc.program_status.query_reply ++
                             comptime t.string(),
@@ -1182,7 +1189,7 @@ pub const Handler = struct {
 
             const written = try aw.toOwnedSliceSentinel(0);
             defer alloc.free(written);
-            handler.writePty(written);
+            handler.writeGeneratedReply(.osc_clipboard, written);
         }
     };
 
@@ -1382,7 +1389,7 @@ pub const Handler = struct {
             success: *const clipboard.Read.Result.Success,
         ) error{ OutOfMemory, WriteFailed }!void {
             const handler = self.handler;
-            if (handler.effects.write_pty == null) return;
+            if (!handler.canWriteGeneratedReply()) return;
 
             var served_buf: [kitty_clipboard.max_read_mimes]clipboard.Content = undefined;
             var served_len: usize = 0;
@@ -1412,7 +1419,7 @@ pub const Handler = struct {
 
             const written = try aw.toOwnedSliceSentinel(0);
             defer alloc.free(written);
-            handler.writePty(written);
+            handler.writeGeneratedReply(.kitty_clipboard, written);
         }
     };
 
@@ -1671,7 +1678,7 @@ pub const Handler = struct {
         self: *Handler,
         response: *const kitty_clipboard.Response,
     ) void {
-        if (self.effects.write_pty == null) return;
+        if (!self.canWriteGeneratedReply()) return;
 
         // Our responses carry at most a status and the echoed id so
         // they virtually always fit on the stack.
@@ -1682,7 +1689,7 @@ pub const Handler = struct {
         response.encode(&aw.writer) catch return;
         const resp = aw.toOwnedSliceSentinel(0) catch return;
         defer alloc.free(resp);
-        self.writePty(resp);
+        self.writeGeneratedReply(.kitty_clipboard, resp);
     }
 
     /// Handle an OSC 72 drag and drop command.
@@ -1710,7 +1717,7 @@ pub const Handler = struct {
         if (aw.written().len > 0) {
             const written = aw.toOwnedSliceSentinel(0) catch return;
             defer response_alloc.free(written);
-            self.writePty(written);
+            self.writeGeneratedReply(.kitty_dnd, written);
         }
 
         if (event) |ev| {
@@ -1834,7 +1841,7 @@ pub const Handler = struct {
         ) catch unreachable;
         const len = writer.buffered().len;
         buf[len] = 0;
-        self.writePty(buf[0..len :0]);
+        self.writeGeneratedReply(.xt_checksum, buf[0..len :0]);
     }
 
     fn reportSize(self: *Handler, style: csi.SizeReportStyle) void {
@@ -2295,7 +2302,7 @@ pub const Handler = struct {
                 )) |resp| resp: {
                     // Don't waste time encoding if we can't write responses
                     // anyways.
-                    if (self.effects.write_pty == null) break :resp;
+                    if (!self.canWriteGeneratedReply()) break :resp;
 
                     // Encode and write the response if we have one.
                     var buf: [1024]u8 = undefined;
@@ -2303,7 +2310,7 @@ pub const Handler = struct {
                     resp.encode(&writer) catch return;
                     writer.writeByte(0) catch return;
                     const final = writer.buffered();
-                    if (final.len > 3) self.writePty(final[0 .. final.len - 1 :0]);
+                    if (final.len > 3) self.writeGeneratedReply(.kitty_graphics, final[0 .. final.len - 1 :0]);
                 }
             },
 
@@ -2312,7 +2319,7 @@ pub const Handler = struct {
                 if (resp) |r| resp_block: {
                     // Don't waste time encoding if we can't write responses
                     // anyways.
-                    if (self.effects.write_pty == null) break :resp_block;
+                    if (!self.canWriteGeneratedReply()) break :resp_block;
 
                     // Glyph responses are short and bounded by the protocol
                     // fields we emit, so this matches the Kitty response
@@ -2322,7 +2329,7 @@ pub const Handler = struct {
                     r.formatWire(&writer) catch return;
                     writer.writeByte(0) catch return;
                     const final = writer.buffered();
-                    self.writePty(final[0 .. final.len - 1 :0]);
+                    self.writeGeneratedReply(.glyph, final[0 .. final.len - 1 :0]);
                 }
             },
         }
@@ -2618,16 +2625,19 @@ test "resize reports mode 2048 geometry" {
     const S = struct {
         var response: [128]u8 = undefined;
         var response_len: usize = 0;
+        var kind: ?Handler.GeneratedReplyKind = null;
 
-        fn writePty(_: *Handler, data: []const u8) void {
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
             @memcpy(response[0..data.len], data);
             response_len = data.len;
+            kind = reply_kind;
         }
     };
     S.response_len = 0;
+    S.kind = null;
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
@@ -2642,6 +2652,7 @@ test "resize reports mode 2048 geometry" {
         "\x1B[48;40;100;720;900t",
         S.response[0..S.response_len],
     );
+    try testing.expectEqual(Handler.GeneratedReplyKind.size, S.kind.?);
 }
 
 test "resize suppresses mode 2048 reports" {
@@ -3294,7 +3305,7 @@ test "full reset" {
     try testing.expect(!t.glyph_glossary.contains(0xE0A0));
 }
 
-test "glyph protocol APC with write_pty callback" {
+test "glyph protocol APC with generated reply callback" {
     if (comptime !build_options.glyph_protocol) return error.SkipZigTest;
 
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
@@ -3302,22 +3313,29 @@ test "glyph protocol APC with write_pty callback" {
 
     const S = struct {
         var last_response: ?[:0]const u8 = null;
+        var kind: ?Handler.GeneratedReplyKind = null;
         fn writePty(_: *Handler, data: []const u8) void {
             if (last_response) |old| testing.allocator.free(old);
             last_response = testing.allocator.dupeZ(u8, data) catch @panic("OOM");
         }
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kind = reply_kind;
+            writePty(undefined, data);
+        }
     };
     S.last_response = null;
+    S.kind = null;
     defer if (S.last_response) |old| testing.allocator.free(old);
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
 
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
     s.nextSlice("\x1B_25a1;s\x1B\\");
     try testing.expectEqualStrings("\x1B_25a1;s;fmt=glyf\x1B\\", S.last_response.?);
+    try testing.expectEqual(Handler.GeneratedReplyKind.glyph, S.kind.?);
 
     s.nextSlice("\x1B_25a1;r;cp=e0a0;AAAAAAAAAAAAAA==\x1B\\");
     try testing.expectEqualStrings("\x1B_25a1;r;cp=e0a0;status=0\x1B\\", S.last_response.?);
@@ -4032,6 +4050,7 @@ test "program_status effect callback" {
         var last_message_len: ?usize = null;
         var written: [128]u8 = undefined;
         var written_len: usize = 0;
+        var generated_kind: ?Handler.GeneratedReplyKind = null;
 
         fn reset() void {
             count = 0;
@@ -4039,6 +4058,7 @@ test "program_status effect callback" {
             last_id_len = null;
             last_message_len = null;
             written_len = 0;
+            generated_kind = null;
         }
 
         fn programStatus(_: *Handler, report: osc.Command.ProgramStatus.Report) void {
@@ -4052,6 +4072,11 @@ test "program_status effect callback" {
 
         fn writePty(_: *Handler, data: []const u8) void {
             written_len += copy(written[written_len..], data);
+        }
+
+        fn generated(_: *Handler, kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            generated_kind = kind;
+            writePty(undefined, data);
         }
 
         fn copy(dst: []u8, src: []const u8) usize {
@@ -4089,6 +4114,15 @@ test "program_status effect callback" {
     s.nextSlice("\x1B]7501;?\x07");
     try testing.expectEqualStrings(reply ++ "\x07", S.written[0..S.written_len]);
     try testing.expectEqual(@as(usize, 0), S.count);
+    S.written_len = 0;
+
+    // A generated callback receives the support reply without requiring a
+    // generic PTY writer.
+    s.handler.effects.write_pty = null;
+    s.handler.effects.write_generated_reply = &S.generated;
+    s.nextSlice("\x1B]7501;?\x1B\\");
+    try testing.expectEqualStrings(reply ++ "\x1B\\", S.written[0..S.written_len]);
+    try testing.expectEqual(Handler.GeneratedReplyKind.program_status, S.generated_kind.?);
     S.written_len = 0;
 
     // A report split across writes. "Syncing photos"
@@ -4406,6 +4440,7 @@ test "clipboard_read effect callback" {
 
     const S = struct {
         var written: std.ArrayList(u8) = .empty;
+        var kind: ?Handler.GeneratedReplyKind = null;
         var count: usize = 0;
         var last_location: clipboard.Location = .standard;
         var last_mimes: []const []const u8 = &.{};
@@ -4421,6 +4456,11 @@ test "clipboard_read effect callback" {
 
         fn writePty(_: *Handler, data: []const u8) void {
             written.appendSlice(testing.allocator, data) catch @panic("OOM");
+        }
+
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kind = reply_kind;
+            writePty(undefined, data);
         }
 
         fn clipboardRead(_: *Handler, read: clipboard.Read) void {
@@ -4452,7 +4492,7 @@ test "clipboard_read effect callback" {
     }
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
     handler.effects.clipboard_read = &S.clipboardRead;
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
@@ -4468,6 +4508,7 @@ test "clipboard_read effect callback" {
     try testing.expect(!S.last_granted);
     try testing.expect(!S.last_can_remember);
     try testing.expectEqualStrings("\x1B]52;c;aGVsbG8=\x1B\\", S.written.items);
+    try testing.expectEqual(Handler.GeneratedReplyKind.osc_clipboard, S.kind.?);
 
     S.written.clearRetainingCapacity();
     s.nextSlice("\x1B]52;p;?\x07");
@@ -4551,6 +4592,7 @@ test "clipboard_write allocation failure is ignored" {
 const KittyClipboardCapture = struct {
     var responses: [1024]u8 = undefined;
     var responses_len: usize = 0;
+    var generated_kind: ?Handler.GeneratedReplyKind = null;
 
     // Write capture. A null write_result returns without replying.
     var write_count: usize = 0;
@@ -4583,6 +4625,7 @@ const KittyClipboardCapture = struct {
 
     fn reset() void {
         responses_len = 0;
+        generated_kind = null;
         write_count = 0;
         write_result = .{ .success = .{} };
         write_reply_twice = false;
@@ -4608,6 +4651,11 @@ const KittyClipboardCapture = struct {
     fn writePty(_: *Handler, data: []const u8) void {
         @memcpy(responses[responses_len..][0..data.len], data);
         responses_len += data.len;
+    }
+
+    fn generated(_: *Handler, kind: Handler.GeneratedReplyKind, data: []const u8) void {
+        generated_kind = kind;
+        writePty(undefined, data);
     }
 
     fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
@@ -4823,7 +4871,7 @@ test "kitty clipboard read without effect is denied with EPERM" {
     S.reset();
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
     handler.effects.clipboard_write = &S.clipboardWrite;
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
@@ -4835,6 +4883,7 @@ test "kitty clipboard read without effect is denied with EPERM" {
         "\x1B]5522;type=read:status=EPERM:id=42\x1B\\",
         S.responseSlice(),
     );
+    try testing.expectEqual(Handler.GeneratedReplyKind.kitty_clipboard, S.generated_kind.?);
 
     // A missing payload is an empty MIME list, still answered.
     S.reset();
@@ -5589,10 +5638,17 @@ test "generated replies are ordered and retain write_pty fallback" {
     try testing.expectEqualStrings("\x1B[?7;1$y", S.replies[1][0..S.lens[1]]);
     try testing.expectEqual(@as(usize, 0), S.generic_count);
 
+    // Embedder input remains generic even when reply classification is on.
+    try testing.expect(try s.handler.paste(.{
+        .contents = .{ .memory = &.{.{ .mime = "text/plain", .data = "paste" }} },
+    }));
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(@as(usize, 1), S.generic_count);
+
     // No generated callback preserves the established generic callback.
     s.handler.effects.write_generated_reply = null;
     s.nextSlice("\x1B[5n");
-    try testing.expectEqual(@as(usize, 1), S.generic_count);
+    try testing.expectEqual(@as(usize, 2), S.generic_count);
 }
 
 test "request mode DECRQM ANSI responses" {
@@ -6210,16 +6266,22 @@ test "DECRQCRA enabled" {
 
     const S = struct {
         var written: ?[]const u8 = null;
+        var kind: ?Handler.GeneratedReplyKind = null;
         fn writePty(_: *Handler, data: []const u8) void {
             if (written) |old| testing.allocator.free(old);
             written = testing.allocator.dupe(u8, data) catch @panic("OOM");
         }
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kind = reply_kind;
+            writePty(undefined, data);
+        }
     };
     S.written = null;
+    S.kind = null;
     defer if (S.written) |v| testing.allocator.free(v);
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
     handler.xt_checksum_report = true;
 
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
@@ -6228,6 +6290,7 @@ test "DECRQCRA enabled" {
     // "hello" sums to 0x214, which the DEC checksum negates.
     s.nextSlice("hello\x1b[3;1;1;1;1;5*y");
     try testing.expectEqualStrings("\x1bP3!~FDEC\x1b\\", S.written.?);
+    try testing.expectEqual(Handler.GeneratedReplyKind.xt_checksum, S.kind.?);
 
     // XTCHECKSUM 1 turns off the negation.
     s.nextSlice("\x1b[1#y\x1b[4;1;1;1;1;5*y");
@@ -6777,16 +6840,22 @@ test "kitty graphics APC response" {
 
     const S = struct {
         var written: ?[]const u8 = null;
+        var kind: ?Handler.GeneratedReplyKind = null;
         fn writePty(_: *Handler, data: []const u8) void {
             if (written) |old| testing.allocator.free(old);
             written = testing.allocator.dupe(u8, data) catch @panic("OOM");
         }
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kind = reply_kind;
+            writePty(undefined, data);
+        }
     };
     S.written = null;
+    S.kind = null;
     defer if (S.written) |old| testing.allocator.free(old);
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
 
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
@@ -6796,6 +6865,7 @@ test "kitty graphics APC response" {
 
     // Should have written a response back
     try testing.expectEqualStrings("\x1b_Gi=1;OK\x1b\\", S.written.?);
+    try testing.expectEqual(Handler.GeneratedReplyKind.kitty_graphics, S.kind.?);
 }
 
 test "kitty graphics via APC" {
@@ -6971,23 +7041,27 @@ test "continuation reconstructs standard stream without duplicate effects" {
 test "kitty dnd: query response" {
     const S = struct {
         var pty: std.ArrayListUnmanaged(u8) = .empty;
-        fn writePty(_: *Handler, data: []const u8) void {
+        var kind: ?Handler.GeneratedReplyKind = null;
+        fn generated(_: *Handler, reply_kind: Handler.GeneratedReplyKind, data: []const u8) void {
+            kind = reply_kind;
             pty.appendSlice(testing.allocator, data) catch unreachable;
         }
     };
     S.pty = .empty;
+    S.kind = null;
     defer S.pty.deinit(testing.allocator);
 
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
     var handler: Handler = .init(&t);
-    handler.effects.write_pty = &S.writePty;
+    handler.effects.write_generated_reply = &S.generated;
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
     s.nextSlice("\x1B]72;t=q:i=3\x1B\\");
     try testing.expectEqualStrings("\x1b]72;t=q:i=3\x1b\\", S.pty.items);
+    try testing.expectEqual(Handler.GeneratedReplyKind.kitty_dnd, S.kind.?);
 }
 
 test "kitty dnd: register, drop, and serve data" {
