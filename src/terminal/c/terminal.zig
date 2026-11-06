@@ -330,6 +330,9 @@ pub const ModeConfig = extern struct {
     }
 };
 
+/// C: GhosttyTerminalGeneratedReplyKind
+pub const GeneratedReplyKind = Handler.GeneratedReplyKind;
+
 /// C callback state for terminal effects.
 ///
 /// Most trampolines are always installed on the stream handler. They check

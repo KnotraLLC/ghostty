@@ -330,6 +330,7 @@ const type_decls = [_]TypeDecl{
     .initEnum("GhosttySysOption", sys.Option, "GHOSTTY_SYS_OPT_"),
     .initEnum("GhosttyTerminalCompressionMode", terminal.CompressionMode, "GHOSTTY_TERMINAL_COMPRESSION_MODE_"),
     .initEnum("GhosttyTerminalCompressionResult", terminal.CompressionResult, "GHOSTTY_TERMINAL_COMPRESSION_RESULT_"),
+    .initEnum("GhosttyTerminalGeneratedReplyKind", terminal.GeneratedReplyKind, "GHOSTTY_TERMINAL_GENERATED_REPLY_"),
     .initEnum("GhosttyTerminalCursorStyle", terminal.TerminalCursorStyle, "GHOSTTY_TERMINAL_CURSOR_STYLE_"),
     .initEnum("GhosttyTerminalData", terminal.TerminalData, "GHOSTTY_TERMINAL_DATA_"),
     .initEnum("GhosttyTerminalOption", terminal.Option, "GHOSTTY_TERMINAL_OPT_"),
@@ -1066,6 +1067,14 @@ test "manifest uses public enum names" {
     try std.testing.expect(!terminal_values.contains("SIZE_CB"));
     try std.testing.expectEqual(@as(i64, 42), terminal_values.get("SEMANTIC_PROMPT").?.integer);
     try std.testing.expectEqual(@as(i64, 43), terminal_values.get("RESET").?.integer);
+    try std.testing.expectEqual(@as(i64, 48), terminal_values.get("GENERATED_REPLY").?.integer);
+
+    const generated_reply = manifest_types.get("GhosttyTerminalGeneratedReplyKind").?.object;
+    try std.testing.expectEqual(@as(i64, 4), generated_reply.get("size").?.integer);
+    const generated_values = generated_reply.get("values").?.object;
+    try std.testing.expectEqual(@as(i64, 0), generated_values.get("DEVICE_STATUS").?.integer);
+    try std.testing.expectEqual(@as(i64, 9), generated_values.get("SIZE").?.integer);
+    try std.testing.expectEqual(@as(i64, std.math.maxInt(c_int)), generated_values.get("MAX_VALUE").?.integer);
 
     const semantic_prompt_values = manifest_types.get("GhosttySemanticPromptKind").?.object.get("values").?.object;
     try std.testing.expectEqual(@as(i64, 0), semantic_prompt_values.get("INVALID").?.integer);
