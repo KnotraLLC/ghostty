@@ -488,6 +488,26 @@ pub fn init(
     app: *App,
     rt_app: *apprt.runtime.App,
     rt_surface: *apprt.runtime.Surface,
+) !void {
+    return self.initWithReplyPolicy(
+        alloc,
+        config_original,
+        app,
+        rt_app,
+        rt_surface,
+        false,
+    );
+}
+
+/// Embedded-only creation path for a policy that must be fixed before termio
+/// starts. Existing runtime callers retain init's normal behavior.
+pub fn initWithReplyPolicy(
+    self: *Surface,
+    alloc: Allocator,
+    config_original: *const configpkg.Config,
+    app: *App,
+    rt_app: *apprt.runtime.App,
+    rt_surface: *apprt.runtime.Surface,
     suppress_generated_replies: bool,
 ) !void {
     // Apply our conditional state. If we fail to apply the conditional state

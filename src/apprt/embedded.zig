@@ -727,7 +727,7 @@ pub const Surface = struct {
 
         // Initialize our surface right away. We're given a view that is
         // ready to use.
-        try self.core_surface.init(
+        try self.core_surface.initWithReplyPolicy(
             app.core_app.alloc,
             &config,
             app.core_app,
